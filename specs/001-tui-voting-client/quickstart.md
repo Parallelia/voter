@@ -73,7 +73,7 @@ cargo fmt --check        # Format check
 
 ## Testing with a Local EC
 
-1. Clone and run the EC daemon: `git clone https://github.com/kriptocracia/ec`
+1. Clone and run the EC daemon: `git clone https://github.com/parallelia/ec`
 2. Start the EC with a test election (see EC README)
 3. Generate registration tokens via the EC's gRPC admin API
 4. Point the voter client at the same relay the EC uses
