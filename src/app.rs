@@ -118,9 +118,9 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyCode) {
-        // Global keys
+        // Global keys (disabled while typing into an input field)
         match key {
-            KeyCode::Char('?') => {
+            KeyCode::Char('?') if !self.is_input_mode() => {
                 self.show_help = !self.show_help;
                 return;
             }

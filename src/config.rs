@@ -17,6 +17,12 @@ pub struct AppConfig {
 pub struct NostrConfig {
     #[serde(default = "default_relays")]
     pub relays: Vec<String>,
+    /// Trusted Electoral Commission Nostr public key (hex or npub).
+    /// When set, only election/result events signed by this key are accepted,
+    /// and Gift Wrap responses from anyone else are discarded. Without it, any
+    /// relay user can publish fake elections and harvest registration tokens.
+    #[serde(default)]
+    pub ec_pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +54,7 @@ fn default_relays() -> Vec<String> {
 fn default_nostr() -> NostrConfig {
     NostrConfig {
         relays: default_relays(),
+        ec_pubkey: None,
     }
 }
 

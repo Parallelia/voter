@@ -32,7 +32,11 @@ pub fn render(app: &App, frame: &mut Frame, election_id: &str) {
     match results {
         Some(res) => {
             let mut entries: Vec<_> = res.tally.iter().collect();
-            entries.sort_by(|a, b| b.votes.cmp(&a.votes));
+            entries.sort_by(|a, b| {
+                b.votes
+                    .partial_cmp(&a.votes)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
             let items: Vec<ListItem> = entries
                 .iter()
@@ -57,9 +61,17 @@ pub fn render(app: &App, frame: &mut Frame, election_id: &str) {
 
                     let winner_badge = if is_winner { " ★" } else { "" };
 
+                    // STV tallies can be fractional (weighted transfers);
+                    // show whole numbers without a decimal point.
+                    let votes_str = if entry.votes.fract() == 0.0 {
+                        format!("{:.0}", entry.votes)
+                    } else {
+                        format!("{:.2}", entry.votes)
+                    };
+
                     ListItem::new(Line::from(vec![
                         Span::styled(format!("  {candidate_name}{winner_badge}"), style),
-                        Span::raw(format!("  —  {} votes", entry.votes)),
+                        Span::raw(format!("  —  {votes_str} votes")),
                     ]))
                 })
                 .collect();

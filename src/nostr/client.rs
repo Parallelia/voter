@@ -27,7 +27,25 @@ pub struct NostrVoterClient {
 
 impl NostrVoterClient {
     /// Create and connect a new Nostr client using the given keys and config.
+    ///
+    /// When `nostr.ec_pubkey` is configured, it is pinned: only events signed
+    /// by that key are trusted (see [`subscribe`](Self::subscribe) and
+    /// [`listen`](Self::listen)).
     pub async fn connect(keys: &Keys, config: &AppConfig) -> Result<Self> {
+        let ec_pubkey = match &config.nostr.ec_pubkey {
+            Some(pk_str) => Some(
+                PublicKey::parse(pk_str)
+                    .map_err(|e| VoterError::Config(format!("invalid ec_pubkey in config: {e}")))?,
+            ),
+            None => {
+                warn!(
+                    "no ec_pubkey configured — accepting election events from ANY author. \
+                     Set nostr.ec_pubkey in voter.toml to pin the Electoral Commission's key."
+                );
+                None
+            }
+        };
+
         let client = Client::new(keys.clone());
 
         for relay_url in &config.nostr.relays {
@@ -39,10 +57,7 @@ impl NostrVoterClient {
 
         client.connect().await;
 
-        Ok(Self {
-            client,
-            ec_pubkey: None,
-        })
+        Ok(Self { client, ec_pubkey })
     }
 
     /// Set the EC's public key (needed to send Gift Wrap messages).
@@ -53,8 +68,17 @@ impl NostrVoterClient {
 
     /// Subscribe to election announcements (Kind 35000), results (Kind 35001),
     /// and Gift Wrap messages addressed to us.
+    ///
+    /// With a pinned EC pubkey the election/result subscription is restricted
+    /// to that author. The Gift Wrap subscription cannot be author-filtered
+    /// (wraps are signed by ephemeral keys per NIP-59); the sender is verified
+    /// after unwrapping instead.
     pub async fn subscribe(&self) -> Result<()> {
-        let election_filter = Filter::new().kinds(vec![Kind::Custom(35_000), Kind::Custom(35_001)]);
+        let mut election_filter =
+            Filter::new().kinds(vec![Kind::Custom(35_000), Kind::Custom(35_001)]);
+        if let Some(ec_pk) = self.ec_pubkey {
+            election_filter = election_filter.author(ec_pk);
+        }
 
         let gift_wrap_filter = Filter::new().kind(Kind::GiftWrap).pubkey(
             self.client
@@ -146,6 +170,7 @@ impl NostrVoterClient {
     pub async fn listen(&self, action_tx: mpsc::UnboundedSender<NostrAction>) -> Result<()> {
         let client = self.client.clone();
         let tx = action_tx;
+        let pinned_ec = self.ec_pubkey;
 
         client
             .handle_notifications(|notification| {
@@ -153,6 +178,19 @@ impl NostrVoterClient {
                 let client = client.clone();
                 async move {
                     if let RelayPoolNotification::Event { event, .. } = notification {
+                        // Relay-side author filters are advisory; enforce the
+                        // pinned EC key locally for election/result events.
+                        if matches!(event.kind, Kind::Custom(35_000) | Kind::Custom(35_001))
+                            && let Some(ec_pk) = pinned_ec
+                            && event.pubkey != ec_pk
+                        {
+                            warn!(
+                                author = %event.pubkey,
+                                kind = %event.kind,
+                                "ignoring election event from untrusted author"
+                            );
+                            return Ok(false);
+                        }
                         match event.kind {
                             Kind::Custom(35_000) => {
                                 match serde_json::from_str::<Election>(event.content.as_str()) {
@@ -181,6 +219,16 @@ impl NostrVoterClient {
                             Kind::GiftWrap => {
                                 match client.unwrap_gift_wrap(&event).await {
                                     Ok(unwrapped) => {
+                                        // Only trust responses sealed by the EC.
+                                        if let Some(ec_pk) = pinned_ec
+                                            && unwrapped.sender != ec_pk
+                                        {
+                                            warn!(
+                                                sender = %unwrapped.sender,
+                                                "ignoring gift wrap from untrusted sender"
+                                            );
+                                            return Ok(false);
+                                        }
                                         match serde_json::from_str::<EcResponse>(
                                             unwrapped.rumor.content.as_str(),
                                         ) {

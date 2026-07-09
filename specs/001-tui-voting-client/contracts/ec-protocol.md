@@ -126,9 +126,9 @@ Addressable event, `d`-tagged by `election_id`.
 {
   "election_id": "<string>",
   "name": "<string>",
-  "start_time": "<ISO 8601>",
-  "end_time": "<ISO 8601>",
-  "status": "Open | InProgress | Finished | Cancelled",
+  "start_time": 1751932800,
+  "end_time": 1751936400,
+  "status": "open | in_progress | finished | cancelled",
   "rules_id": "plurality | stv",
   "rsa_pub_key": "<base64 DER-encoded RSA public key>",
   "candidates": [
@@ -138,6 +138,14 @@ Addressable event, `d`-tagged by `election_id`.
 }
 ```
 
+`start_time` / `end_time` are unix timestamps (seconds). `status` values are
+snake_case strings, exactly as stored by the EC daemon.
+
+**Trust**: clients MUST verify the event author is the expected EC pubkey
+(configured via `nostr.ec_pubkey`). Anyone can publish Kind 35000 events; an
+unpinned client can be fed a fake election carrying an attacker's RSA key and
+tricked into surrendering its registration token.
+
 ### Kind 35001 — Election Results
 
 Addressable event, `d`-tagged by `election_id`.
@@ -145,10 +153,17 @@ Addressable event, `d`-tagged by `election_id`.
 ```json
 {
   "election_id": "<string>",
+  "name": "<string>",
+  "rules_id": "plurality | stv",
   "elected": [<candidate_id>, ...],
   "tally": [
-    { "candidate_id": 1, "votes": 42 },
-    { "candidate_id": 2, "votes": 37 }
-  ]
+    { "candidate_id": 1, "votes": 42.0, "status": "elected" },
+    { "candidate_id": 2, "votes": 37.5, "status": "excluded" }
+  ],
+  "count_sheet": [ ... ]
 }
 ```
+
+`votes` is a JSON number that MAY be fractional: STV surplus transfers are
+weighted. `count_sheet` (per-round STV audit trail) is optional. Clients may
+ignore fields they do not use, but must not assume integer vote counts.
