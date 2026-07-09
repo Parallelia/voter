@@ -18,7 +18,7 @@ use tracing::{info, warn};
 use app::{Action, App, Screen, ShouldQuit};
 use voter::config::{self, AppConfig};
 use voter::identity;
-use voter::nostr::client::{NostrAction, NostrVoterClient};
+use voter::nostr::client::{NostrAction, NostrVoterClient, VoterCommand};
 use voter::state::AppState;
 
 #[tokio::main]
@@ -88,11 +88,13 @@ async fn main() -> anyhow::Result<()> {
     // Connect to Nostr relays if identity is available
     let mut nostr_task: Option<tokio::task::JoinHandle<()>> = None;
     if let Some(ref keys) = app.keys {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<VoterCommand>();
+        app.cmd_tx = Some(cmd_tx);
         let nostr_tx = action_tx.clone();
         let nostr_keys = keys.clone();
         let nostr_config = app.config.clone();
         nostr_task = Some(tokio::spawn(async move {
-            connect_nostr(&nostr_keys, &nostr_config, nostr_tx).await;
+            connect_nostr(&nostr_keys, &nostr_config, nostr_tx, cmd_rx).await;
         }));
     }
 
@@ -139,11 +141,13 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(handle) = nostr_task.take() {
                     handle.abort();
                 }
+                let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<VoterCommand>();
+                app.cmd_tx = Some(cmd_tx);
                 let nostr_tx = app.action_tx.clone();
                 let nostr_keys = keys.clone();
                 let nostr_config = app.config.clone();
                 nostr_task = Some(tokio::spawn(async move {
-                    connect_nostr(&nostr_keys, &nostr_config, nostr_tx).await;
+                    connect_nostr(&nostr_keys, &nostr_config, nostr_tx, cmd_rx).await;
                 }));
             }
         }
@@ -162,7 +166,12 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Connect to Nostr relays with exponential backoff reconnection.
-async fn connect_nostr(keys: &Keys, config: &AppConfig, action_tx: mpsc::UnboundedSender<Action>) {
+async fn connect_nostr(
+    keys: &Keys,
+    config: &AppConfig,
+    action_tx: mpsc::UnboundedSender<Action>,
+    mut cmd_rx: mpsc::UnboundedReceiver<VoterCommand>,
+) {
     let mut backoff_secs = 1u64;
     let max_backoff = 60u64;
 
@@ -192,9 +201,15 @@ async fn connect_nostr(keys: &Keys, config: &AppConfig, action_tx: mpsc::Unbound
                         }
                     });
 
-                    // Listen blocks until disconnection
-                    if let Err(e) = client.listen(nostr_tx).await {
-                        warn!(error = %e, "listener disconnected");
+                    // Listen blocks until disconnection; process app commands
+                    // (register / request-token / cast-vote) concurrently.
+                    tokio::select! {
+                        res = client.listen(nostr_tx.clone()) => {
+                            if let Err(e) = res {
+                                warn!(error = %e, "listener disconnected");
+                            }
+                        }
+                        _ = client.process_commands(&mut cmd_rx, nostr_tx.clone(), config) => {}
                     }
 
                     client.disconnect().await;

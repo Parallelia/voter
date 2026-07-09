@@ -5,9 +5,10 @@ use tracing::warn;
 use crate::config::AppConfig;
 use crate::error::{Result, VoterError};
 use crate::nostr::events::{Election, ElectionResults};
-use crate::nostr::messages::EcResponse;
-#[allow(unused_imports)]
-use crate::nostr::messages::VoterMessage;
+use crate::nostr::messages::{EcResponse, VoterMessage};
+
+/// How long to wait for an EC reply before reporting a timeout.
+pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Actions produced by the Nostr client for the app event loop.
 #[derive(Debug, Clone)]
@@ -17,6 +18,29 @@ pub enum NostrAction {
     EcResponse(EcResponse),
     ConnectionStatus(bool),
     Error(String),
+    /// The request with this id received no EC response in time.
+    RequestTimeout(u64),
+    /// The request with this id could not be sent or failed outright.
+    RequestFailed(u64, String),
+}
+
+/// Commands sent from the app to the Nostr task.
+#[derive(Debug, Clone)]
+pub enum VoterCommand {
+    /// Gift-wrap a message to the EC from the voter's persistent identity
+    /// (register, request-token). The reply arrives via the main listener.
+    Send {
+        request_id: u64,
+        ec_pubkey: String,
+        msg: VoterMessage,
+    },
+    /// Gift-wrap a message to the EC from a fresh throwaway keypair
+    /// (cast-vote) and wait for the EC's reply on that keypair.
+    SendAnonymous {
+        request_id: u64,
+        ec_pubkey: String,
+        msg: VoterMessage,
+    },
 }
 
 /// Wraps the nostr-sdk Client for voter-specific operations.
@@ -103,13 +127,9 @@ impl NostrVoterClient {
         Ok(())
     }
 
-    /// Send a voter message to the EC via NIP-59 Gift Wrap.
-    #[allow(dead_code)]
-    pub async fn send_to_ec(&self, msg: &VoterMessage) -> Result<()> {
-        let ec_pubkey = self
-            .ec_pubkey
-            .ok_or_else(|| VoterError::Nostr("EC public key not set".to_string()))?;
-
+    /// Send a voter message to the EC via NIP-59 Gift Wrap using the voter's
+    /// persistent identity. The EC's reply arrives through the main listener.
+    pub async fn send_to_ec(&self, ec_pubkey: &PublicKey, msg: &VoterMessage) -> Result<()> {
         let content = serde_json::to_string(msg)?;
         let my_pubkey = self
             .client
@@ -122,26 +142,26 @@ impl NostrVoterClient {
         let rumor = EventBuilder::text_note(content).build(my_pubkey);
 
         self.client
-            .gift_wrap(&ec_pubkey, rumor, Vec::<Tag>::new())
+            .gift_wrap(ec_pubkey, rumor, Vec::<Tag>::new())
             .await
             .map_err(|e| VoterError::Nostr(format!("gift_wrap send failed: {e}")))?;
 
         Ok(())
     }
 
-    /// Send a voter message to the EC using a specific (throwaway) signer.
-    #[allow(dead_code)]
-    pub async fn send_to_ec_anonymous(
+    /// Send a voter message to the EC from a fresh throwaway keypair and wait
+    /// for the EC's Gift Wrap reply addressed to that keypair.
+    ///
+    /// Used for cast-vote: the ballot must never be linkable to the voter's
+    /// persistent identity, and the EC replies to whichever key sent the
+    /// message, so the reply has to be awaited on the throwaway key.
+    pub async fn send_anonymous_and_wait(
         &self,
+        ec_pubkey: &PublicKey,
         msg: &VoterMessage,
-        throwaway_keys: &Keys,
         config: &AppConfig,
-    ) -> Result<()> {
-        let ec_pubkey = self
-            .ec_pubkey
-            .ok_or_else(|| VoterError::Nostr("EC public key not set".to_string()))?;
-
-        // Create a temporary client with the throwaway keys
+    ) -> Result<EcResponse> {
+        let throwaway_keys = Keys::generate();
         let anon_client = Client::new(throwaway_keys.clone());
         for relay_url in &config.nostr.relays {
             anon_client
@@ -151,18 +171,138 @@ impl NostrVoterClient {
         }
         anon_client.connect().await;
 
-        let content = serde_json::to_string(msg)?;
-        let rumor = EventBuilder::text_note(content).build(throwaway_keys.public_key());
-
-        let result = anon_client
-            .gift_wrap(&ec_pubkey, rumor, Vec::<Tag>::new())
-            .await;
+        let result = Self::anonymous_roundtrip(&anon_client, &throwaway_keys, ec_pubkey, msg).await;
 
         anon_client.disconnect().await;
+        result
+    }
 
-        result.map_err(|e| VoterError::Nostr(format!("anonymous gift_wrap failed: {e}")))?;
+    async fn anonymous_roundtrip(
+        anon_client: &Client,
+        throwaway_keys: &Keys,
+        ec_pubkey: &PublicKey,
+        msg: &VoterMessage,
+    ) -> Result<EcResponse> {
+        // Subscribe for the reply before sending so it cannot be missed.
+        let reply_filter = Filter::new()
+            .kind(Kind::GiftWrap)
+            .pubkey(throwaway_keys.public_key())
+            .limit(0);
+        anon_client
+            .subscribe(reply_filter, None)
+            .await
+            .map_err(|e| VoterError::Nostr(format!("subscribe reply failed: {e}")))?;
 
-        Ok(())
+        let mut notifications = anon_client.notifications();
+
+        let content = serde_json::to_string(msg)?;
+        let rumor = EventBuilder::text_note(content).build(throwaway_keys.public_key());
+        anon_client
+            .gift_wrap(ec_pubkey, rumor, Vec::<Tag>::new())
+            .await
+            .map_err(|e| VoterError::Nostr(format!("anonymous gift_wrap failed: {e}")))?;
+
+        let wait = async {
+            loop {
+                let notification = notifications
+                    .recv()
+                    .await
+                    .map_err(|e| VoterError::Nostr(format!("notification stream closed: {e}")))?;
+                let RelayPoolNotification::Event { event, .. } = notification else {
+                    continue;
+                };
+                if event.kind != Kind::GiftWrap {
+                    continue;
+                }
+                let Ok(unwrapped) = anon_client.unwrap_gift_wrap(&event).await else {
+                    continue;
+                };
+                // Only the EC's reply counts.
+                if unwrapped.sender != *ec_pubkey {
+                    warn!(sender = %unwrapped.sender, "ignoring reply from untrusted sender");
+                    continue;
+                }
+                match serde_json::from_str::<EcResponse>(unwrapped.rumor.content.as_str()) {
+                    Ok(response) => return Ok(response),
+                    Err(e) => warn!(error = %e, "failed to parse EC reply"),
+                }
+            }
+        };
+
+        tokio::time::timeout(REQUEST_TIMEOUT, wait)
+            .await
+            .map_err(|_| VoterError::Nostr("EC did not respond in time".to_string()))?
+    }
+
+    /// Process app commands until the channel closes. Runs alongside
+    /// [`listen`](Self::listen); one command is handled at a time (the app
+    /// enforces a single in-flight request).
+    pub async fn process_commands(
+        &self,
+        cmd_rx: &mut mpsc::UnboundedReceiver<VoterCommand>,
+        action_tx: mpsc::UnboundedSender<NostrAction>,
+        config: &AppConfig,
+    ) {
+        while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                VoterCommand::Send {
+                    request_id,
+                    ec_pubkey,
+                    msg,
+                } => {
+                    let ec_pk = match PublicKey::parse(&ec_pubkey) {
+                        Ok(pk) => pk,
+                        Err(e) => {
+                            let _ = action_tx.send(NostrAction::RequestFailed(
+                                request_id,
+                                format!("invalid EC pubkey: {e}"),
+                            ));
+                            continue;
+                        }
+                    };
+                    match self.send_to_ec(&ec_pk, &msg).await {
+                        Ok(()) => {
+                            // The reply arrives via the main listener; arm a
+                            // timeout so the app never hangs on a lost reply.
+                            let tx = action_tx.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(REQUEST_TIMEOUT).await;
+                                let _ = tx.send(NostrAction::RequestTimeout(request_id));
+                            });
+                        }
+                        Err(e) => {
+                            let _ = action_tx
+                                .send(NostrAction::RequestFailed(request_id, e.to_string()));
+                        }
+                    }
+                }
+                VoterCommand::SendAnonymous {
+                    request_id,
+                    ec_pubkey,
+                    msg,
+                } => {
+                    let ec_pk = match PublicKey::parse(&ec_pubkey) {
+                        Ok(pk) => pk,
+                        Err(e) => {
+                            let _ = action_tx.send(NostrAction::RequestFailed(
+                                request_id,
+                                format!("invalid EC pubkey: {e}"),
+                            ));
+                            continue;
+                        }
+                    };
+                    match self.send_anonymous_and_wait(&ec_pk, &msg, config).await {
+                        Ok(response) => {
+                            let _ = action_tx.send(NostrAction::EcResponse(response));
+                        }
+                        Err(e) => {
+                            let _ = action_tx
+                                .send(NostrAction::RequestFailed(request_id, e.to_string()));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Start listening for Nostr events and forward them as NostrActions.

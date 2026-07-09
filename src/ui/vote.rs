@@ -112,8 +112,8 @@ pub fn render(app: &App, frame: &mut Frame, election_id: &str) {
 
     let submit_hint = if !app.stv_ranking.is_empty() {
         Line::from(vec![
-            Span::styled("Enter", Style::default().fg(Color::Yellow)),
-            Span::raw(" on Submit to confirm your vote"),
+            Span::styled("s", Style::default().fg(Color::Yellow)),
+            Span::raw(" to submit your vote"),
         ])
     } else {
         Line::default()
@@ -137,8 +137,35 @@ pub fn render(app: &App, frame: &mut Frame, election_id: &str) {
         hints.push(Span::styled("d", Style::default().fg(Color::Yellow)));
         hints.push(Span::raw(" remove  "));
     }
+    hints.push(Span::styled("s", Style::default().fg(Color::Yellow)));
+    hints.push(Span::raw(" submit  "));
     hints.push(Span::styled("Esc", Style::default().fg(Color::Yellow)));
     hints.push(Span::raw(" back"));
 
     frame.render_widget(Paragraph::new(Line::from(hints)), chunks[3]);
+
+    // Confirmation dialog overlay
+    if let Some(confirm_focused) = app.vote_confirm {
+        let names: Vec<String> = app
+            .stv_ranking
+            .iter()
+            .filter_map(|id| election.candidates.iter().find(|c| c.id == *id))
+            .map(|c| c.name.clone())
+            .collect();
+        let mut lines = vec![
+            "You are about to cast your vote:".to_string(),
+            String::new(),
+        ];
+        if is_stv {
+            for (i, name) in names.iter().enumerate() {
+                lines.push(format!("  {}. {}", i + 1, name));
+            }
+        } else {
+            lines.push(format!("  {}", names.join(", ")));
+        }
+        lines.push(String::new());
+        lines.push("This cannot be undone.".to_string());
+
+        crate::ui::widgets::confirm_dialog::render(frame, "Confirm Vote", &lines, confirm_focused);
+    }
 }
