@@ -55,8 +55,9 @@ fn render_help_content(frame: &mut Frame, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
-        shortcut("v", "Cast vote (if token available)"),
+        shortcut("Enter", "Enter registration token"),
         shortcut("t", "Request voting token"),
+        shortcut("v", "Cast vote (if token available)"),
         shortcut("r", "View results"),
         Line::default(),
         Line::from(Span::styled(
@@ -67,6 +68,7 @@ fn render_help_content(frame: &mut Frame, area: Rect) {
         )),
         shortcut("Enter/Space", "Add candidate to ranking"),
         shortcut("d", "Remove from ranking"),
+        shortcut("s", "Submit vote (with confirmation)"),
     ];
 
     let help = Paragraph::new(lines);

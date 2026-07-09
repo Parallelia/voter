@@ -80,14 +80,29 @@ pub fn render(app: &App, frame: &mut Frame, election_id: &str) {
 
     let mut actions = vec![];
 
-    if has_voted {
+    if app.editing_token {
+        actions.push(Line::from(vec![
+            Span::raw("Registration token: "),
+            Span::styled(
+                app.token_input.as_str(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(Color::Gray)),
+        ]));
+        actions.push(Line::from(vec![
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw(" submit  "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::raw(" cancel"),
+        ]));
+    } else if has_voted {
         actions.push(Line::from(Span::styled(
             " Voted ",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         )));
-    } else if has_token {
+    } else if has_token && matches!(election.status, ElectionStatus::InProgress) {
         actions.push(Line::from(vec![
             Span::styled("[v] ", Style::default().fg(Color::Yellow)),
             Span::raw("Cast your vote"),

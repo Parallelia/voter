@@ -16,6 +16,15 @@ pub type BrsaSk = SecretKey<Sha384, PSS, Randomized>;
 /// Size of MessageRandomizer in bytes (fixed at 32 per blind-rsa-signatures).
 const MESSAGE_RANDOMIZER_LEN: usize = 32;
 
+/// Parse a base64 DER-encoded RSA public key (as published in Kind 35000
+/// election events).
+pub fn parse_pk_b64(b64: &str) -> Result<BrsaPk> {
+    let der = BASE64_STANDARD
+        .decode(b64)
+        .map_err(|e| VoterError::Crypto(format!("base64 decode rsa_pub_key: {e}")))?;
+    BrsaPk::from_der(&der).map_err(|e| VoterError::Crypto(format!("invalid RSA public key: {e}")))
+}
+
 /// Blind a nonce hash using the election's RSA public key.
 ///
 /// Returns the blinding result (contains the blind message to send to EC
