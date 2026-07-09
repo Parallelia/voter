@@ -69,13 +69,16 @@ pub fn save_identity(keys: &Keys, password: Option<&str>, path: &Path) -> Result
 /// Write a file readable only by its owner (0600 on Unix).
 #[cfg(unix)]
 fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(path)?;
+    // mode() only applies when the file is created; a pre-existing identity
+    // file (e.g. written by an older version) may carry broader permissions.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     file.write_all(data)?;
     Ok(())
 }
