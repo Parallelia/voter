@@ -10,7 +10,7 @@ pub fn render(app: &App, frame: &mut Frame) {
     let area = centered_rect(60, 50, frame.area());
 
     let block = Block::default()
-        .title(" Criptocracia Voter ")
+        .title(" Parallelia Voter ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -27,7 +27,7 @@ pub fn render(app: &App, frame: &mut Frame) {
     .split(inner);
 
     let title = Paragraph::new(Line::from(vec![Span::styled(
-        "Welcome to Criptocracia Voter",
+        "Welcome to Parallelia Voter",
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),

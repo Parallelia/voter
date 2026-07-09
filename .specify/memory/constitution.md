@@ -27,7 +27,7 @@
   Follow-up TODOs: none
 -->
 
-# Criptocracia Voter — Project Constitution
+# Parallelia Voter — Project Constitution
 
 ## Core Purpose
 

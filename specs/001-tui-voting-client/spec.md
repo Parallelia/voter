@@ -3,7 +3,7 @@
 **Feature Branch**: `001-tui-voting-client`
 **Created**: 2026-03-21
 **Status**: Draft
-**Input**: User description: "TUI voting client for Criptocracia anonymous voting system"
+**Input**: User description: "TUI voting client for Parallelia anonymous voting system"
 
 ## User Scenarios & Testing *(mandatory)*
 

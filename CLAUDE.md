@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**voter** — a Rust voting client for the [kriptocracia/ec](https://github.com/kriptocracia/ec) Electoral Commission. Communicates with the EC daemon over Nostr NIP-59 Gift Wrap messages to register voters, obtain anonymous blind-RSA voting tokens, and cast ballots from unlinkable keypairs.
+**voter** — a Rust voting client for the [parallelia/ec](https://github.com/parallelia/ec) Electoral Commission. Communicates with the EC daemon over Nostr NIP-59 Gift Wrap messages to register voters, obtain anonymous blind-RSA voting tokens, and cast ballots from unlinkable keypairs.
 
 ## Build & Test Commands
 

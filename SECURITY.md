@@ -34,7 +34,7 @@ No custom cryptographic code is used. `unsafe` code is denied at the compiler le
 
 ## Reporting Vulnerabilities
 
-If you discover a security vulnerability, please report it privately rather than opening a public issue. Contact the maintainers through GitHub's private vulnerability reporting feature on the [repository](https://github.com/kriptocracia/voter).
+If you discover a security vulnerability, please report it privately rather than opening a public issue. Contact the maintainers through GitHub's private vulnerability reporting feature on the [repository](https://github.com/parallelia/voter).
 
 ## Secure Development Practices
 

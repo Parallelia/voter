@@ -1,6 +1,6 @@
 # voter
 
-A terminal-based voting client for the [Criptocracia Electoral Commission](https://github.com/kriptocracia/ec). Communicates over Nostr using NIP-59 Gift Wrap messages to register voters, obtain anonymous blind-RSA voting tokens, and cast ballots from unlinkable keypairs.
+A terminal-based voting client for the [Parallelia Electoral Commission](https://github.com/parallelia/ec). Communicates over Nostr using NIP-59 Gift Wrap messages to register voters, obtain anonymous blind-RSA voting tokens, and cast ballots from unlinkable keypairs.
 
 ## Features
 

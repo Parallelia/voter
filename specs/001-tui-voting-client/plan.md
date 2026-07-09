@@ -5,7 +5,7 @@
 
 ## Summary
 
-Build a terminal-based voting client (TUI) for the Criptocracia
+Build a terminal-based voting client (TUI) for the Parallelia
 Electoral Commission. The client implements the full voter flow:
 identity management, election discovery via Nostr Kind 35000 events,
 voter registration, anonymous token acquisition via blind RSA

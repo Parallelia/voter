@@ -3,7 +3,7 @@ name = "voter"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "TUI voting client for the Criptocracia Electoral Commission"
+description = "TUI voting client for the Parallelia Electoral Commission"
 
 [dependencies]
 ratatui = "0.30"
