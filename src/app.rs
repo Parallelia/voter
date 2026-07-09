@@ -614,61 +614,87 @@ impl App {
     }
 
     fn handle_ec_response(&mut self, response: &EcResponse) {
-        let pending = self.pending.take();
-        self.is_loading = false;
-        self.loading_step = None;
+        // Only a response whose action matches the in-flight request may
+        // consume the pending state. Relays can replay historical Gift Wraps
+        // on reconnect; letting a stale "register-confirmed" swallow a pending
+        // token request would drop the real blind signature when it arrives —
+        // and the EC has already burned this voter's only token slot.
+        let expected_action = |kind: PendingKind| match kind {
+            PendingKind::Register => "register-confirmed",
+            PendingKind::RequestToken => "token-issued",
+            PendingKind::CastVote => "vote-recorded",
+        };
 
         match response {
             EcResponse::Ok {
                 action,
                 blind_signature,
-            } => match (action.as_str(), pending) {
-                ("register-confirmed", Some(p)) if p.kind == PendingKind::Register => {
-                    self.persistent_state.mark_registered(p.election_id);
-                    self.save_state();
-                    self.status_message = Some("Registered ✓".to_string());
+            } => {
+                let pending = self
+                    .pending
+                    .take_if(|p| expected_action(p.kind) == action.as_str());
+                if pending.is_some() {
+                    self.is_loading = false;
+                    self.loading_step = None;
                 }
-                ("token-issued", Some(p)) if p.kind == PendingKind::RequestToken => {
-                    let Some(pending_blind) = self.pending_blind.take() else {
-                        self.error_message =
-                            Some("Received a token with no pending request".to_string());
-                        return;
-                    };
-                    let Some(sig_b64) = blind_signature else {
-                        self.error_message =
-                            Some("EC response missing blind signature".to_string());
-                        return;
-                    };
-                    match token::complete_token_request(pending_blind, sig_b64) {
-                        Ok(voting_token) => {
-                            self.persistent_state
-                                .store_token(p.election_id, voting_token);
-                            self.save_state();
-                            self.status_message =
-                                Some("Voting token received and verified ✓".to_string());
-                        }
-                        Err(e) => {
-                            self.error_message = Some(format!("Token verification failed: {e}"));
-                        }
-                    }
-                }
-                ("vote-recorded", Some(p)) if p.kind == PendingKind::CastVote => {
-                    if let Err(e) = self.persistent_state.consume_token(&p.election_id) {
-                        self.error_message = Some(format!("Vote recorded, state error: {e}"));
-                    } else {
+                match (action.as_str(), pending) {
+                    ("register-confirmed", Some(p)) => {
+                        self.persistent_state.mark_registered(p.election_id);
                         self.save_state();
-                        self.status_message = Some("Vote recorded ✓".to_string());
+                        self.status_message = Some("Registered ✓".to_string());
                     }
-                    self.stv_ranking.clear();
-                    self.screen = Screen::ElectionDetail {
-                        election_id: p.election_id,
-                    };
+                    ("token-issued", Some(p)) => {
+                        let Some(pending_blind) = self.pending_blind.take() else {
+                            self.error_message =
+                                Some("Received a token with no pending request".to_string());
+                            return;
+                        };
+                        let Some(sig_b64) = blind_signature else {
+                            self.error_message =
+                                Some("EC response missing blind signature".to_string());
+                            return;
+                        };
+                        match token::complete_token_request(pending_blind, sig_b64) {
+                            Ok(voting_token) => {
+                                self.persistent_state
+                                    .store_token(p.election_id, voting_token);
+                                self.save_state();
+                                self.status_message =
+                                    Some("Voting token received and verified ✓".to_string());
+                            }
+                            Err(e) => {
+                                self.error_message =
+                                    Some(format!("Token verification failed: {e}"));
+                            }
+                        }
+                    }
+                    ("vote-recorded", Some(p)) => {
+                        if let Err(e) = self.persistent_state.consume_token(&p.election_id) {
+                            self.error_message = Some(format!("Vote recorded, state error: {e}"));
+                        } else {
+                            self.save_state();
+                            self.status_message = Some("Vote recorded ✓".to_string());
+                        }
+                        self.stv_ranking.clear();
+                        self.screen = Screen::ElectionDetail {
+                            election_id: p.election_id,
+                        };
+                    }
+                    // Unsolicited or replayed response: display it, but leave
+                    // any in-flight request untouched.
+                    _ => {
+                        self.status_message = Some(format_ec_response(response));
+                    }
                 }
-                _ => {
-                    self.status_message = Some(format_ec_response(response));
-                }
-            },
+            }
             EcResponse::Error { .. } => {
+                // EC errors carry no action field, so they cannot be
+                // correlated; treat any error as failing the in-flight
+                // request (if one exists).
+                if self.pending.take().is_some() {
+                    self.is_loading = false;
+                    self.loading_step = None;
+                }
                 self.pending_blind = None;
                 self.error_message = Some(format_ec_response(response));
             }
@@ -709,5 +735,88 @@ fn format_ec_response(response: &EcResponse) -> String {
         EcResponse::Error { code, message } => {
             format!("EC error: {code} — {message}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        App::new(AppConfig::default(), AppState::default(), tx)
+    }
+
+    fn set_pending(app: &mut App, kind: PendingKind) -> u64 {
+        app.pending = Some(PendingRequest {
+            id: 42,
+            election_id: "e1".to_string(),
+            kind,
+        });
+        app.is_loading = true;
+        42
+    }
+
+    /// A replayed/unsolicited Ok response whose action does not match the
+    /// in-flight request must NOT consume the pending state: swallowing a
+    /// pending token request would drop the real blind signature when it
+    /// arrives, permanently burning the voter's token slot.
+    #[test]
+    fn mismatched_ok_response_does_not_consume_pending() {
+        let mut app = test_app();
+        set_pending(&mut app, PendingKind::RequestToken);
+
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "register-confirmed".to_string(),
+            blind_signature: None,
+        });
+
+        assert!(app.pending.is_some(), "pending must survive a stale reply");
+        assert!(app.is_loading, "still waiting for the real reply");
+    }
+
+    /// An EC error fails the in-flight request (errors carry no action field,
+    /// so they cannot be correlated more precisely).
+    #[test]
+    fn error_response_clears_pending() {
+        let mut app = test_app();
+        set_pending(&mut app, PendingKind::Register);
+
+        app.handle_ec_response(&EcResponse::Error {
+            code: voter::nostr::messages::EcErrorCode::InvalidToken,
+            message: "bad token".to_string(),
+        });
+
+        assert!(app.pending.is_none());
+        assert!(!app.is_loading);
+        assert!(app.error_message.is_some());
+    }
+
+    /// A timeout for a previous request must not cancel a newer one.
+    #[test]
+    fn stale_timeout_is_ignored_matching_timeout_clears() {
+        let mut app = test_app();
+        set_pending(&mut app, PendingKind::CastVote);
+
+        app.handle_nostr(NostrAction::RequestTimeout(41));
+        assert!(app.pending.is_some(), "stale timeout must be ignored");
+
+        app.handle_nostr(NostrAction::RequestTimeout(42));
+        assert!(app.pending.is_none());
+        assert!(!app.is_loading);
+    }
+
+    /// Same for failures reported by the Nostr task.
+    #[test]
+    fn stale_failure_is_ignored_matching_failure_clears() {
+        let mut app = test_app();
+        set_pending(&mut app, PendingKind::RequestToken);
+
+        app.handle_nostr(NostrAction::RequestFailed(7, "boom".to_string()));
+        assert!(app.pending.is_some());
+
+        app.handle_nostr(NostrAction::RequestFailed(42, "boom".to_string()));
+        assert!(app.pending.is_none());
+        assert!(app.error_message.is_some());
     }
 }

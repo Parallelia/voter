@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -33,8 +33,14 @@ pub fn render(app: &App, frame: &mut Frame) {
     };
     let connection_text = if app.connected { "●" } else { "○" };
 
+    // The tracing warning about a missing EC pin is invisible in release
+    // builds (tracing is only initialized in debug); the status bar is the
+    // one place the user is guaranteed to see it.
+    let unpinned = app.config.nostr.ec_pubkey.is_none();
+
     let chunks = Layout::horizontal([
         Constraint::Length(3),
+        Constraint::Length(if unpinned { 12 } else { 0 }),
         Constraint::Min(0),
         Constraint::Length(20),
     ])
@@ -47,13 +53,21 @@ pub fn render(app: &App, frame: &mut Frame) {
     ));
     frame.render_widget(conn, chunks[0]);
 
+    if unpinned {
+        let warn = Paragraph::new(Span::styled(
+            "UNPINNED ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(warn, chunks[1]);
+    }
+
     // Status message or screen name
     let status_text = app.status_message.as_deref().unwrap_or(screen_name);
     let status = Paragraph::new(Span::styled(
         status_text,
         Style::default().fg(Color::DarkGray),
     ));
-    frame.render_widget(status, chunks[1]);
+    frame.render_widget(status, chunks[2]);
 
     // Screen name on the right
     let right = Paragraph::new(Line::from(vec![Span::styled(
@@ -61,5 +75,5 @@ pub fn render(app: &App, frame: &mut Frame) {
         Style::default().fg(Color::DarkGray),
     )]))
     .right_aligned();
-    frame.render_widget(right, chunks[2]);
+    frame.render_widget(right, chunks[3]);
 }

@@ -43,6 +43,12 @@ Configuration is stored at `~/.config/voter/voter.toml` (created with defaults o
 [nostr]
 relays = ["wss://relay.mostro.network", "wss://nos.lol"]
 
+# Trusted Electoral Commission Nostr public key (hex or npub).
+# STRONGLY RECOMMENDED: without it, any relay user can publish fake
+# election events and trick the client into surrendering its registration
+# token. The status bar shows UNPINNED while this is unset.
+# ec_pubkey = "npub1..."
+
 [identity]
 path = "~/.config/voter/identity.json"
 
@@ -54,7 +60,7 @@ theme = "dark"
 
 | Path | Purpose |
 |------|---------|
-| `~/.config/voter/voter.toml` | Relay URLs, identity path, UI theme |
+| `~/.config/voter/voter.toml` | Relay URLs, EC pubkey pin, identity path, UI theme |
 | `~/.config/voter/identity.json` | Voter Nostr keypair (plaintext) |
 | `~/.config/voter/identity.age` | Voter Nostr keypair (password-encrypted) |
 | `~/.config/voter/state.json` | Registrations and voting tokens |

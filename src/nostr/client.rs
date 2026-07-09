@@ -291,6 +291,17 @@ impl NostrVoterClient {
                             continue;
                         }
                     };
+                    // Watchdog: this future is dropped if the main listener
+                    // disconnects (tokio::select in the caller), which would
+                    // otherwise leave the app waiting forever — the internal
+                    // timeout dies with the future. The spawned task survives
+                    // the drop; a stale timeout is ignored by the app.
+                    let watchdog_tx = action_tx.clone();
+                    let watchdog = tokio::spawn(async move {
+                        tokio::time::sleep(REQUEST_TIMEOUT + std::time::Duration::from_secs(5))
+                            .await;
+                        let _ = watchdog_tx.send(NostrAction::RequestTimeout(request_id));
+                    });
                     match self.send_anonymous_and_wait(&ec_pk, &msg, config).await {
                         Ok(response) => {
                             let _ = action_tx.send(NostrAction::EcResponse(response));
@@ -300,6 +311,7 @@ impl NostrVoterClient {
                                 .send(NostrAction::RequestFailed(request_id, e.to_string()));
                         }
                     }
+                    watchdog.abort();
                 }
             }
         }
