@@ -53,6 +53,10 @@ pub enum EcErrorCode {
     UnknownRules,
     InvalidMessage,
     InternalError,
+    /// Any error code this client version does not know. Keeps the response
+    /// parseable instead of dropping it entirely.
+    #[serde(other)]
+    Unknown,
 }
 
 impl std::fmt::Display for EcErrorCode {
@@ -70,6 +74,7 @@ impl std::fmt::Display for EcErrorCode {
             Self::UnknownRules => write!(f, "Unknown voting rules"),
             Self::InvalidMessage => write!(f, "Malformed message"),
             Self::InternalError => write!(f, "EC internal error"),
+            Self::Unknown => write!(f, "Unknown error code"),
         }
     }
 }

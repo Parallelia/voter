@@ -1,12 +1,17 @@
 use serde::{Deserialize, Serialize};
 
 /// An election parsed from a Kind 35000 Nostr event.
+///
+/// Field types must match what the EC daemon actually publishes:
+/// unix timestamps as integers and snake_case status strings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Election {
     pub election_id: String,
     pub name: String,
-    pub start_time: String,
-    pub end_time: String,
+    /// Unix timestamp (seconds).
+    pub start_time: i64,
+    /// Unix timestamp (seconds).
+    pub end_time: i64,
     pub status: ElectionStatus,
     pub rules_id: String,
     /// Base64 DER-encoded RSA public key for blind signing.
@@ -17,8 +22,10 @@ pub struct Election {
     pub ec_pubkey: Option<String>,
 }
 
+/// Election status as published by the EC (`"open"`, `"in_progress"`,
+/// `"finished"`, `"cancelled"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "snake_case")]
 pub enum ElectionStatus {
     Open,
     InProgress,
@@ -54,5 +61,33 @@ pub struct ElectionResults {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TallyEntry {
     pub candidate_id: u32,
-    pub votes: u64,
+    /// Vote total. Fractional under STV (weighted surplus transfers).
+    pub votes: f64,
+}
+
+/// Format a unix timestamp (seconds) as a human-readable UTC datetime
+/// (`YYYY-MM-DD HH:MM UTC`). Used by the TUI to display election times.
+pub fn format_unix_utc(ts: i64) -> String {
+    let days = ts.div_euclid(86_400);
+    let secs_of_day = ts.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = secs_of_day / 3600;
+    let minute = (secs_of_day % 3600) / 60;
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
+/// Convert days since 1970-01-01 to a (year, month, day) civil date.
+/// Algorithm from Howard Hinnant's date algorithms (public domain).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // year of era
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+    let mp = (5 * doy + 2) / 153; // month index [0, 11] starting in March
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }

@@ -105,3 +105,25 @@ fn import_keypair_invalid_hex_fails() {
     let result = identity::import_keypair("not-a-valid-hex-key");
     assert!(result.is_err());
 }
+
+/// Identity files must end up owner-only (0600) even when overwriting a
+/// pre-existing file that had broader permissions (e.g. created by an older
+/// version): OpenOptions::mode() alone only applies at creation time.
+#[cfg(unix)]
+#[test]
+fn save_identity_tightens_permissions_of_existing_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("identity.json");
+
+    // Simulate an old identity file with world-readable permissions.
+    std::fs::write(&path, "{}").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let keys = identity::generate_keypair();
+    identity::save_identity(&keys, None, &path).unwrap();
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "identity file must be owner-only");
+}

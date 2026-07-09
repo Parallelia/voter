@@ -54,7 +54,8 @@ pub fn render(app: &App, frame: &mut Frame, election_id: &str) {
         ]),
         Line::from(format!(
             "Start: {}  |  End: {}",
-            election.start_time, election.end_time
+            voter::nostr::events::format_unix_utc(election.start_time),
+            voter::nostr::events::format_unix_utc(election.end_time)
         )),
     ])
     .block(Block::default().borders(Borders::BOTTOM));
