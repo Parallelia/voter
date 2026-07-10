@@ -30,14 +30,14 @@ pub enum VoterCommand {
     /// Gift-wrap a message to the EC from the voter's persistent identity
     /// (register, request-token). The reply arrives via the main listener.
     Send {
-        request_id: u64,
+        task_id: u64,
         ec_pubkey: String,
         msg: VoterMessage,
     },
     /// Gift-wrap a message to the EC from a fresh throwaway keypair
     /// (cast-vote) and wait for the EC's reply on that keypair.
     SendAnonymous {
-        request_id: u64,
+        task_id: u64,
         ec_pubkey: String,
         msg: VoterMessage,
     },
@@ -104,7 +104,10 @@ impl NostrVoterClient {
             election_filter = election_filter.author(ec_pk);
         }
 
-        let gift_wrap_filter = Filter::new().kind(Kind::GiftWrap).pubkey(
+        // limit(0): live events only. Historical Gift Wraps are replayed on
+        // every (re)subscribe, predate any in-flight request by definition,
+        // and must never reach the response-correlation path.
+        let gift_wrap_filter = Filter::new().kind(Kind::GiftWrap).limit(0).pubkey(
             self.client
                 .signer()
                 .await
@@ -246,7 +249,7 @@ impl NostrVoterClient {
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 VoterCommand::Send {
-                    request_id,
+                    task_id,
                     ec_pubkey,
                     msg,
                 } => {
@@ -254,7 +257,7 @@ impl NostrVoterClient {
                         Ok(pk) => pk,
                         Err(e) => {
                             let _ = action_tx.send(NostrAction::RequestFailed(
-                                request_id,
+                                task_id,
                                 format!("invalid EC pubkey: {e}"),
                             ));
                             continue;
@@ -267,17 +270,17 @@ impl NostrVoterClient {
                             let tx = action_tx.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(REQUEST_TIMEOUT).await;
-                                let _ = tx.send(NostrAction::RequestTimeout(request_id));
+                                let _ = tx.send(NostrAction::RequestTimeout(task_id));
                             });
                         }
                         Err(e) => {
-                            let _ = action_tx
-                                .send(NostrAction::RequestFailed(request_id, e.to_string()));
+                            let _ =
+                                action_tx.send(NostrAction::RequestFailed(task_id, e.to_string()));
                         }
                     }
                 }
                 VoterCommand::SendAnonymous {
-                    request_id,
+                    task_id,
                     ec_pubkey,
                     msg,
                 } => {
@@ -285,21 +288,33 @@ impl NostrVoterClient {
                         Ok(pk) => pk,
                         Err(e) => {
                             let _ = action_tx.send(NostrAction::RequestFailed(
-                                request_id,
+                                task_id,
                                 format!("invalid EC pubkey: {e}"),
                             ));
                             continue;
                         }
                     };
+                    // Watchdog: this future is dropped if the main listener
+                    // disconnects (tokio::select in the caller), which would
+                    // otherwise leave the app waiting forever — the internal
+                    // timeout dies with the future. The spawned task survives
+                    // the drop; a stale timeout is ignored by the app.
+                    let watchdog_tx = action_tx.clone();
+                    let watchdog = tokio::spawn(async move {
+                        tokio::time::sleep(REQUEST_TIMEOUT + std::time::Duration::from_secs(5))
+                            .await;
+                        let _ = watchdog_tx.send(NostrAction::RequestTimeout(task_id));
+                    });
                     match self.send_anonymous_and_wait(&ec_pk, &msg, config).await {
                         Ok(response) => {
                             let _ = action_tx.send(NostrAction::EcResponse(response));
                         }
                         Err(e) => {
-                            let _ = action_tx
-                                .send(NostrAction::RequestFailed(request_id, e.to_string()));
+                            let _ =
+                                action_tx.send(NostrAction::RequestFailed(task_id, e.to_string()));
                         }
                     }
+                    watchdog.abort();
                 }
             }
         }

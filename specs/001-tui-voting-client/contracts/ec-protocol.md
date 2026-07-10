@@ -18,6 +18,11 @@ NIP-59 Gift Wrap (Nostr Kind 1059).
 
 ## Voter → EC Messages
 
+Every request includes a `request_id`: a fresh client-generated random string
+(16 bytes, hex-encoded; the EC accepts up to 64 bytes). The EC echoes it in
+its reply — success or error — so the client can correlate responses with the
+in-flight request and ignore Gift Wraps replayed by relays on reconnect.
+
 ### register
 
 Registers the voter's Nostr pubkey for an election.
@@ -26,7 +31,8 @@ Registers the voter's Nostr pubkey for an election.
 {
   "action": "register",
   "election_id": "<string>",
-  "registration_token": "<string>"
+  "registration_token": "<string>",
+  "request_id": "<hex string>"
 }
 ```
 
@@ -41,7 +47,8 @@ Requests a blind RSA signature on a blinded nonce.
 {
   "action": "request-token",
   "election_id": "<string>",
-  "blinded_nonce": "<base64-encoded blind message>"
+  "blinded_nonce": "<base64-encoded blind message>",
+  "request_id": "<hex string>"
 }
 ```
 
@@ -58,7 +65,8 @@ Submits an anonymous ballot with the unblinded token.
   "election_id": "<string>",
   "candidate_ids": [<integer>, ...],
   "h_n": "<hex SHA-256 of original nonce>",
-  "token": "<base64(signature_bytes ++ randomizer_32bytes)>"
+  "token": "<base64(signature_bytes ++ randomizer_32bytes)>",
+  "request_id": "<hex string>"
 }
 ```
 
@@ -76,7 +84,8 @@ Submits an anonymous ballot with the unblinded token.
 ```json
 {
   "status": "ok",
-  "action": "<action-name>"
+  "action": "<action-name>",
+  "request_id": "<echo of the request's request_id>"
 }
 ```
 
@@ -85,7 +94,8 @@ For `request-token` success, includes the blind signature:
 {
   "status": "ok",
   "action": "token-issued",
-  "blind_signature": "<base64-encoded blind signature>"
+  "blind_signature": "<base64-encoded blind signature>",
+  "request_id": "<echo of the request's request_id>"
 }
 ```
 
@@ -95,9 +105,16 @@ For `request-token` success, includes the blind signature:
 {
   "status": "error",
   "code": "<ERROR_CODE>",
-  "message": "<human-readable description>"
+  "message": "<human-readable description>",
+  "request_id": "<echo of the request's request_id>"
 }
 ```
+
+`request_id` is present only when the request carried one. The client matches
+strictly: a response that does not echo the in-flight request's `request_id`
+(including responses lacking the field) is displayed but never consumes or
+aborts the in-flight request. Against an EC that predates the echo, requests
+fail via the client's send timeout.
 
 **Error codes**:
 

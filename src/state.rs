@@ -34,12 +34,14 @@ impl AppState {
     }
 
     /// Save state to disk, creating parent directories if needed.
+    /// Written owner-only (0600 on Unix): the state holds voting tokens,
+    /// which are bearer credentials — anyone who reads one can cast the vote.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let contents = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, contents)?;
+        crate::identity::write_secret_file(path, contents.as_bytes())?;
         Ok(())
     }
 

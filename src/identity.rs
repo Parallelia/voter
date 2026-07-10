@@ -67,8 +67,10 @@ pub fn save_identity(keys: &Keys, password: Option<&str>, path: &Path) -> Result
 }
 
 /// Write a file readable only by its owner (0600 on Unix).
+/// Also used for the persistent state file, which stores voting tokens
+/// (bearer credentials).
 #[cfg(unix)]
-fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
+pub(crate) fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -84,7 +86,7 @@ fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
+pub(crate) fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
     std::fs::write(path, data)?;
     Ok(())
 }

@@ -55,6 +55,17 @@ pub struct PendingRequest {
     pub id: u64,
     pub election_id: String,
     pub kind: PendingKind,
+    /// Wire-level correlation id sent inside the request; the EC echoes it in
+    /// its reply. Random (never a counter) so a replayed response from an
+    /// earlier session can never match a current request.
+    pub request_id: String,
+}
+
+/// Fresh random correlation id for one EC request (16 bytes, hex-encoded).
+fn fresh_request_id() -> Result<String, getrandom::Error> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes)?;
+    Ok(hex::encode(bytes))
 }
 
 /// Central application state.
@@ -87,7 +98,7 @@ pub struct App {
     pub cmd_tx: Option<mpsc::UnboundedSender<VoterCommand>>,
     pub pending: Option<PendingRequest>,
     pub pending_blind: Option<PendingBlind>,
-    next_request_id: u64,
+    next_task_id: u64,
 }
 
 impl App {
@@ -121,7 +132,7 @@ impl App {
             cmd_tx: None,
             pending: None,
             pending_blind: None,
-            next_request_id: 0,
+            next_task_id: 0,
         }
     }
 
@@ -509,17 +520,18 @@ impl App {
             return;
         };
 
-        self.next_request_id += 1;
-        let request_id = self.next_request_id;
+        self.next_task_id += 1;
+        let task_id = self.next_task_id;
+        let request_id = msg.request_id().to_string();
         let cmd = if anonymous {
             VoterCommand::SendAnonymous {
-                request_id,
+                task_id,
                 ec_pubkey,
                 msg,
             }
         } else {
             VoterCommand::Send {
-                request_id,
+                task_id,
                 ec_pubkey,
                 msg,
             }
@@ -531,9 +543,10 @@ impl App {
         }
 
         self.pending = Some(PendingRequest {
-            id: request_id,
+            id: task_id,
             election_id: election_id.to_string(),
             kind,
+            request_id,
         });
         self.is_loading = true;
         self.loading_step = Some(loading_step.to_string());
@@ -544,9 +557,14 @@ impl App {
         let registration_token = self.token_input.trim().to_string();
         self.editing_token = false;
         self.token_input.clear();
+        let Ok(request_id) = fresh_request_id() else {
+            self.error_message = Some("System RNG unavailable".to_string());
+            return;
+        };
         let msg = VoterMessage::Register {
             election_id: election_id.to_string(),
             registration_token,
+            request_id,
         };
         self.send_command(
             election_id,
@@ -565,9 +583,14 @@ impl App {
         // secret locally until the EC's blind signature arrives.
         match token::begin_token_request(election_id, &election.rsa_pub_key) {
             Ok((pending_blind, blinded_nonce)) => {
+                let Ok(request_id) = fresh_request_id() else {
+                    self.error_message = Some("System RNG unavailable".to_string());
+                    return;
+                };
                 let msg = VoterMessage::RequestToken {
                     election_id: election_id.to_string(),
                     blinded_nonce,
+                    request_id,
                 };
                 self.pending_blind = Some(pending_blind);
                 self.send_command(
@@ -596,11 +619,16 @@ impl App {
                 return;
             }
         };
+        let Ok(request_id) = fresh_request_id() else {
+            self.error_message = Some("System RNG unavailable".to_string());
+            return;
+        };
         let msg = VoterMessage::CastVote {
             election_id: election_id.to_string(),
             candidate_ids: self.stv_ranking.clone(),
             h_n: voting_token.h_n.clone(),
             token: wire_token,
+            request_id,
         };
         // Cast anonymously: the ballot must never be linkable to the voter's
         // persistent identity.
@@ -614,63 +642,113 @@ impl App {
     }
 
     fn handle_ec_response(&mut self, response: &EcResponse) {
-        let pending = self.pending.take();
-        self.is_loading = false;
-        self.loading_step = None;
+        // Only a response correlated with the in-flight request may consume
+        // the pending state. Relays can replay historical Gift Wraps on
+        // reconnect; letting a stale reply swallow a pending token request
+        // would drop the real blind signature when it arrives — and the EC
+        // has already burned this voter's only token slot.
+        //
+        // Correlation is strict: every request is sent with a request_id, so
+        // only a response echoing that exact id may consume the pending
+        // state. Responses without an echo (pre-correlation EC, or replays of
+        // pre-upgrade Gift Wraps) are displayed but never trusted; against an
+        // EC that cannot echo ids, requests fail via the send timeout.
+        let expected_action = |kind: PendingKind| match kind {
+            PendingKind::Register => "register-confirmed",
+            PendingKind::RequestToken => "token-issued",
+            PendingKind::CastVote => "vote-recorded",
+        };
+        let id_matches = |pending: &PendingRequest, echoed: &Option<String>| {
+            echoed.as_deref() == Some(pending.request_id.as_str())
+        };
 
         match response {
             EcResponse::Ok {
                 action,
                 blind_signature,
-            } => match (action.as_str(), pending) {
-                ("register-confirmed", Some(p)) if p.kind == PendingKind::Register => {
-                    self.persistent_state.mark_registered(p.election_id);
-                    self.save_state();
-                    self.status_message = Some("Registered ✓".to_string());
+                request_id,
+            } => {
+                let pending = self.pending.take_if(|p| {
+                    expected_action(p.kind) == action.as_str() && id_matches(p, request_id)
+                });
+                if pending.is_some() {
+                    self.is_loading = false;
+                    self.loading_step = None;
                 }
-                ("token-issued", Some(p)) if p.kind == PendingKind::RequestToken => {
-                    let Some(pending_blind) = self.pending_blind.take() else {
-                        self.error_message =
-                            Some("Received a token with no pending request".to_string());
-                        return;
-                    };
-                    let Some(sig_b64) = blind_signature else {
-                        self.error_message =
-                            Some("EC response missing blind signature".to_string());
-                        return;
-                    };
-                    match token::complete_token_request(pending_blind, sig_b64) {
-                        Ok(voting_token) => {
-                            self.persistent_state
-                                .store_token(p.election_id, voting_token);
-                            self.save_state();
-                            self.status_message =
-                                Some("Voting token received and verified ✓".to_string());
-                        }
-                        Err(e) => {
-                            self.error_message = Some(format!("Token verification failed: {e}"));
-                        }
-                    }
-                }
-                ("vote-recorded", Some(p)) if p.kind == PendingKind::CastVote => {
-                    if let Err(e) = self.persistent_state.consume_token(&p.election_id) {
-                        self.error_message = Some(format!("Vote recorded, state error: {e}"));
-                    } else {
+                match (action.as_str(), pending) {
+                    ("register-confirmed", Some(p)) => {
+                        self.persistent_state.mark_registered(p.election_id);
                         self.save_state();
-                        self.status_message = Some("Vote recorded ✓".to_string());
+                        self.status_message = Some("Registered ✓".to_string());
                     }
-                    self.stv_ranking.clear();
-                    self.screen = Screen::ElectionDetail {
-                        election_id: p.election_id,
-                    };
+                    ("token-issued", Some(p)) => {
+                        // Check the signature before consuming the blinding
+                        // secret: taking it on a malformed reply would lose
+                        // the only material that can unblind a retry.
+                        let Some(sig_b64) = blind_signature else {
+                            self.error_message =
+                                Some("EC response missing blind signature".to_string());
+                            return;
+                        };
+                        let Some(pending_blind) = self.pending_blind.take() else {
+                            self.error_message =
+                                Some("Received a token with no pending request".to_string());
+                            return;
+                        };
+                        match token::complete_token_request(pending_blind, sig_b64) {
+                            Ok(voting_token) => {
+                                self.persistent_state
+                                    .store_token(p.election_id, voting_token);
+                                self.save_state();
+                                self.status_message =
+                                    Some("Voting token received and verified ✓".to_string());
+                            }
+                            Err(e) => {
+                                self.error_message =
+                                    Some(format!("Token verification failed: {e}"));
+                            }
+                        }
+                    }
+                    ("vote-recorded", Some(p)) => {
+                        if let Err(e) = self.persistent_state.consume_token(&p.election_id) {
+                            self.error_message = Some(format!("Vote recorded, state error: {e}"));
+                        } else {
+                            self.save_state();
+                            self.status_message = Some("Vote recorded ✓".to_string());
+                        }
+                        self.stv_ranking.clear();
+                        self.screen = Screen::ElectionDetail {
+                            election_id: p.election_id,
+                        };
+                    }
+                    // Unsolicited or replayed response: display it, but leave
+                    // any in-flight request untouched.
+                    _ => {
+                        self.status_message = Some(format_ec_response(response));
+                    }
                 }
-                _ => {
+            }
+            EcResponse::Error { request_id, .. } => {
+                if self.pending.is_none() {
+                    // Nothing in flight; just surface the error.
+                    self.error_message = Some(format_ec_response(response));
+                    return;
+                }
+                if self
+                    .pending
+                    .take_if(|p| id_matches(p, request_id))
+                    .is_some()
+                {
+                    self.is_loading = false;
+                    self.loading_step = None;
+                    self.pending_blind = None;
+                    self.error_message = Some(format_ec_response(response));
+                } else {
+                    // Error echoing a different request id: a replayed Gift
+                    // Wrap from an earlier request. Show it, but leave the
+                    // in-flight request (and its blinding secret) untouched.
                     self.status_message = Some(format_ec_response(response));
                 }
-            },
-            EcResponse::Error { .. } => {
-                self.pending_blind = None;
-                self.error_message = Some(format_ec_response(response));
             }
         }
     }
@@ -699,6 +777,7 @@ fn format_ec_response(response: &EcResponse) -> String {
         EcResponse::Ok {
             action,
             blind_signature,
+            ..
         } => {
             if blind_signature.is_some() {
                 format!("EC: {action} (signature received)")
@@ -706,8 +785,189 @@ fn format_ec_response(response: &EcResponse) -> String {
                 format!("EC: {action}")
             }
         }
-        EcResponse::Error { code, message } => {
+        EcResponse::Error { code, message, .. } => {
             format!("EC error: {code} — {message}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        App::new(AppConfig::default(), AppState::default(), tx)
+    }
+
+    fn set_pending(app: &mut App, kind: PendingKind) -> u64 {
+        app.pending = Some(PendingRequest {
+            id: 42,
+            election_id: "e1".to_string(),
+            kind,
+            request_id: "req-42".to_string(),
+        });
+        app.is_loading = true;
+        42
+    }
+
+    /// A replayed/unsolicited Ok response whose action does not match the
+    /// in-flight request must NOT consume the pending state: swallowing a
+    /// pending token request would drop the real blind signature when it
+    /// arrives, permanently burning the voter's token slot.
+    #[test]
+    fn mismatched_ok_response_does_not_consume_pending() {
+        let mut app = test_app();
+        set_pending(&mut app, PendingKind::RequestToken);
+
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "register-confirmed".to_string(),
+            blind_signature: None,
+            request_id: None,
+        });
+
+        assert!(app.pending.is_some(), "pending must survive a stale reply");
+        assert!(app.is_loading, "still waiting for the real reply");
+    }
+
+    /// A replayed Ok whose action matches but whose request_id echoes an
+    /// older request must not consume the pending state either — action
+    /// matching alone cannot tell two requests of the same kind apart.
+    #[test]
+    fn ok_with_stale_request_id_does_not_consume_pending() {
+        let mut app = test_app();
+        set_pending(&mut app, PendingKind::Register);
+
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "register-confirmed".to_string(),
+            blind_signature: None,
+            request_id: Some("req-OLD".to_string()),
+        });
+
+        assert!(app.pending.is_some(), "pending must survive a stale reply");
+        assert!(app.is_loading);
+    }
+
+    /// The real reply — matching action and echoed request_id — consumes the
+    /// pending state.
+    #[test]
+    fn ok_with_matching_request_id_consumes_pending() {
+        let mut app = test_app();
+        set_pending(&mut app, PendingKind::Register);
+
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "register-confirmed".to_string(),
+            blind_signature: None,
+            request_id: Some("req-42".to_string()),
+        });
+
+        assert!(app.pending.is_none());
+        assert!(!app.is_loading);
+        assert!(app.status_message.is_some());
+    }
+
+    /// An error without a request_id echo cannot be correlated — it is a
+    /// replayed pre-upgrade Gift Wrap or a pre-correlation EC. Either way it
+    /// must not abort the in-flight request; against an EC that cannot echo
+    /// ids the request fails via the send timeout instead.
+    #[test]
+    fn error_without_request_id_does_not_clear_pending() {
+        let mut app = test_app();
+        set_pending(&mut app, PendingKind::Register);
+
+        app.handle_ec_response(&EcResponse::Error {
+            code: voter::nostr::messages::EcErrorCode::InvalidToken,
+            message: "bad token".to_string(),
+            request_id: None,
+        });
+
+        assert!(app.pending.is_some(), "uncorrelated errors must be ignored");
+        assert!(app.is_loading);
+        assert!(app.error_message.is_none());
+    }
+
+    /// Same strictness for Ok: a matching action without the request_id echo
+    /// (e.g. a replayed pre-upgrade "token-issued") must not consume pending
+    /// state — action matching alone cannot tell two requests apart.
+    #[test]
+    fn ok_without_request_id_does_not_consume_pending() {
+        let mut app = test_app();
+        set_pending(&mut app, PendingKind::Register);
+
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "register-confirmed".to_string(),
+            blind_signature: None,
+            request_id: None,
+        });
+
+        assert!(app.pending.is_some());
+        assert!(app.is_loading);
+    }
+
+    /// A replayed error echoing an older request_id must not abort the
+    /// in-flight request: a stale error aborting a newer token request would
+    /// drop the blinding secret needed for the real blind signature.
+    #[test]
+    fn error_with_stale_request_id_leaves_pending_untouched() {
+        let mut app = test_app();
+        set_pending(&mut app, PendingKind::RequestToken);
+
+        app.handle_ec_response(&EcResponse::Error {
+            code: voter::nostr::messages::EcErrorCode::InternalError,
+            message: "boom".to_string(),
+            request_id: Some("req-OLD".to_string()),
+        });
+
+        assert!(app.pending.is_some(), "pending must survive a stale error");
+        assert!(app.is_loading);
+        assert!(
+            app.error_message.is_none(),
+            "stale errors surface as status, not as the request's failure"
+        );
+    }
+
+    /// An error echoing the in-flight request_id fails that request.
+    #[test]
+    fn error_with_matching_request_id_clears_pending() {
+        let mut app = test_app();
+        set_pending(&mut app, PendingKind::Register);
+
+        app.handle_ec_response(&EcResponse::Error {
+            code: voter::nostr::messages::EcErrorCode::InvalidToken,
+            message: "bad token".to_string(),
+            request_id: Some("req-42".to_string()),
+        });
+
+        assert!(app.pending.is_none());
+        assert!(!app.is_loading);
+        assert!(app.error_message.is_some());
+    }
+
+    /// A timeout for a previous request must not cancel a newer one.
+    #[test]
+    fn stale_timeout_is_ignored_matching_timeout_clears() {
+        let mut app = test_app();
+        set_pending(&mut app, PendingKind::CastVote);
+
+        app.handle_nostr(NostrAction::RequestTimeout(41));
+        assert!(app.pending.is_some(), "stale timeout must be ignored");
+
+        app.handle_nostr(NostrAction::RequestTimeout(42));
+        assert!(app.pending.is_none());
+        assert!(!app.is_loading);
+    }
+
+    /// Same for failures reported by the Nostr task.
+    #[test]
+    fn stale_failure_is_ignored_matching_failure_clears() {
+        let mut app = test_app();
+        set_pending(&mut app, PendingKind::RequestToken);
+
+        app.handle_nostr(NostrAction::RequestFailed(7, "boom".to_string()));
+        assert!(app.pending.is_some());
+
+        app.handle_nostr(NostrAction::RequestFailed(42, "boom".to_string()));
+        assert!(app.pending.is_none());
+        assert!(app.error_message.is_some());
     }
 }
