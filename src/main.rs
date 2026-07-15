@@ -81,7 +81,13 @@ async fn main() -> anyhow::Result<()> {
     if matches!(initial_screen, Screen::ElectionList) {
         match identity::load_identity(None, identity_path) {
             Ok(keys) => app.keys = Some(keys),
-            Err(_) => app.screen = Screen::Welcome,
+            Err(e) => {
+                // Surface the failure instead of silently landing on Welcome;
+                // the Welcome screen refuses to overwrite the existing file.
+                warn!(error = %e, "failed to load existing identity");
+                app.error_message = Some(format!("Failed to load identity: {e}"));
+                app.screen = Screen::Welcome;
+            }
         }
     }
 
