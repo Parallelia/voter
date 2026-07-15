@@ -329,7 +329,10 @@ impl App {
                     self.token_input.clear();
                 }
                 KeyCode::Enter => {
-                    if !self.token_input.is_empty() {
+                    // Trim first: a whitespace-only input would be trimmed to
+                    // "" by submit_registration and sent to the EC anyway — a
+                    // guaranteed error (or 30 s timeout) instead of a no-op.
+                    if !self.token_input.trim().is_empty() {
                         self.submit_registration(&eid);
                     }
                 }
@@ -955,6 +958,25 @@ mod tests {
         app.handle_nostr(NostrAction::RequestTimeout(42));
         assert!(app.pending.is_none());
         assert!(!app.is_loading);
+    }
+
+    /// A whitespace-only registration token must be a local no-op: it would
+    /// be trimmed to "" and sent to the EC as an empty token, guaranteeing an
+    /// error (or a 30 s timeout) instead of local rejection.
+    #[test]
+    fn whitespace_only_registration_token_is_not_submitted() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), AppState::default(), tx);
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+        app.editing_token = true;
+        app.token_input = "   ".to_string();
+
+        app.handle_key(KeyCode::Enter);
+
+        assert!(app.pending.is_none(), "no request may be started");
+        assert!(app.editing_token, "input mode stays active for correction");
     }
 
     /// Same for failures reported by the Nostr task.
