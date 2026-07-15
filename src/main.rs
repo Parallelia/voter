@@ -3,7 +3,7 @@ mod ui;
 
 use std::io;
 
-use crossterm::event::{Event, EventStream};
+use crossterm::event::{Event, EventStream, KeyEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -111,7 +111,11 @@ async fn main() -> anyhow::Result<()> {
         let mut reader = EventStream::new();
         while let Some(Ok(event)) = reader.next().await {
             match event {
-                Event::Key(key) => {
+                // Only Press events: on Windows and kitty-protocol terminals
+                // Release/Repeat events are also delivered, and forwarding
+                // them doubles every keystroke (double navigation, double
+                // Enter — enough to submit a vote confirm dialog twice).
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     let _ = tx.send(Action::KeyPress(key.code));
                 }
                 Event::Resize(_, _) => {
