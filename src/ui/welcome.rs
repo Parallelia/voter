@@ -74,3 +74,52 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     ])
     .split(vertical[1])[1]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::render;
+    use crate::ui::test_support::{render_to_text, test_app};
+
+    #[test]
+    fn renders_title_and_identity_options() {
+        // Arrange
+        let app = test_app();
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f));
+
+        // Assert
+        assert!(text.contains("Parallelia Voter"));
+        assert!(text.contains("Welcome to Parallelia Voter"));
+        assert!(text.contains("Set up your voting identity to get started."));
+        assert!(text.contains("[g]"));
+        assert!(text.contains("Generate new identity"));
+        assert!(text.contains("[i]"));
+        assert!(text.contains("Import existing identity"));
+    }
+
+    #[test]
+    fn renders_error_message_when_present() {
+        // Arrange
+        let mut app = test_app();
+        app.error_message = Some("Failed to save identity".to_string());
+
+        // Act: taller terminal so the error chunk gets rows
+        let text = render_to_text(80, 40, |f| render(&app, f));
+
+        // Assert
+        assert!(text.contains("Failed to save identity"));
+    }
+
+    #[test]
+    fn omits_error_line_when_no_error_is_set() {
+        // Arrange
+        let app = test_app();
+
+        // Act
+        let text = render_to_text(80, 40, |f| render(&app, f));
+
+        // Assert
+        assert!(!text.contains("Failed"));
+    }
+}

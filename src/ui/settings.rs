@@ -69,3 +69,42 @@ pub fn render(app: &App, frame: &mut Frame) {
     ]));
     frame.render_widget(hints, chunks[5]);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::render;
+    use crate::ui::test_support::{render_to_text, test_app};
+
+    #[test]
+    fn renders_relays_theme_and_placeholder_identity() {
+        // Arrange
+        let app = test_app();
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f));
+
+        // Assert
+        assert!(text.contains("Settings"));
+        assert!(text.contains("Nostr Relays"));
+        assert!(text.contains("wss://relay.mostro.network"));
+        assert!(text.contains("wss://nos.lol"));
+        assert!(text.contains("Current: Dark"));
+        assert!(text.contains("Public key: Not loaded..."));
+    }
+
+    #[test]
+    fn renders_truncated_public_key_when_identity_is_loaded() {
+        // Arrange
+        let mut app = test_app();
+        let keys = voter::identity::generate_keypair();
+        let expected_prefix = voter::identity::export_public_key(&keys)[..16].to_string();
+        app.keys = Some(keys);
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f));
+
+        // Assert
+        assert!(text.contains(&format!("Public key: {expected_prefix}...")));
+        assert!(!text.contains("Not loaded"));
+    }
+}

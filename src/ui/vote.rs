@@ -169,3 +169,117 @@ pub fn render(app: &App, frame: &mut Frame, election_id: &str) {
         crate::ui::widgets::confirm_dialog::render(frame, "Confirm Vote", &lines, confirm_focused);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::render;
+    use crate::ui::test_support::{render_to_text, sample_election, test_app};
+    use voter::nostr::events::ElectionStatus;
+
+    fn app_with_rules(rules_id: &str) -> crate::app::App {
+        let mut app = test_app();
+        app.elections.insert(
+            "e1".to_string(),
+            sample_election("e1", "Board Election", ElectionStatus::InProgress, rules_id),
+        );
+        app
+    }
+
+    #[test]
+    fn renders_nothing_for_unknown_election() {
+        // Arrange
+        let app = test_app();
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "missing"));
+
+        // Assert: early return leaves the buffer blank
+        assert!(text.chars().all(|c| c == ' ' || c == '\n'));
+    }
+
+    #[test]
+    fn renders_plurality_ballot_with_radio_selection() {
+        // Arrange
+        let mut app = app_with_rules("plurality");
+        app.stv_ranking = vec![2];
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(text.contains("Vote: Board Election"));
+        assert!(text.contains("(Select one candidate)"));
+        assert!(text.contains("(●) 2. Bob"));
+        assert!(text.contains("( ) 3. Carol"));
+        assert!(text.contains("▸ ( ) 1. Alice"));
+        assert!(text.contains("Selected: Bob"));
+        assert!(!text.contains("remove"));
+    }
+
+    #[test]
+    fn shows_no_selection_placeholder_when_ballot_empty() {
+        // Arrange
+        let app = app_with_rules("plurality");
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(text.contains("No selection yet"));
+        assert!(!text.contains("to submit your vote"));
+    }
+
+    #[test]
+    fn renders_stv_ballot_with_rank_numbers_and_remove_hint() {
+        // Arrange
+        let mut app = app_with_rules("stv");
+        app.stv_ranking = vec![2, 1];
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(text.contains("(Rank candidates in order of preference)"));
+        assert!(text.contains("[1] 2. Bob"));
+        assert!(text.contains("[2] 1. Alice"));
+        assert!(text.contains("[ ] 3. Carol"));
+        assert!(text.contains("Selected: Bob > Alice"));
+        assert!(text.contains("remove"));
+    }
+
+    #[test]
+    fn renders_confirm_dialog_for_stv_ranking_with_confirm_focused() {
+        // Arrange
+        let mut app = app_with_rules("stv");
+        app.stv_ranking = vec![2, 1];
+        app.vote_confirm = Some(true);
+
+        // Act: taller terminal so all dialog lines fit
+        let text = render_to_text(80, 40, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(text.contains("Confirm Vote"));
+        assert!(text.contains("You are about to cast your vote:"));
+        assert!(text.contains("1. Bob"));
+        assert!(text.contains("2. Alice"));
+        assert!(text.contains("This cannot be undone."));
+        assert!(text.contains("Confirm"));
+        assert!(text.contains("Go Back"));
+    }
+
+    #[test]
+    fn renders_confirm_dialog_for_plurality_choice_with_back_focused() {
+        // Arrange
+        let mut app = app_with_rules("plurality");
+        app.stv_ranking = vec![3];
+        app.vote_confirm = Some(false);
+
+        // Act
+        let text = render_to_text(80, 40, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(text.contains("Confirm Vote"));
+        assert!(text.contains("Carol"));
+        assert!(text.contains("This cannot be undone."));
+    }
+}

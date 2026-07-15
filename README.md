@@ -112,6 +112,38 @@ Integration tests that require a running EC daemon are ignored by default:
 RUN_EC_INTEGRATION=1 cargo test -- --ignored
 ```
 
+### Test Coverage
+
+Current coverage (measured with [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)):
+
+| Metric | Coverage |
+|--------|----------|
+| Lines | **89.63%** (3560/3972) |
+| Functions | 87.41% (347/397) |
+| Regions | 90.14% (6182/6858) |
+
+Every module except two is at 94–100% line coverage. The remaining gap is
+code that cannot run without external infrastructure:
+
+- `src/main.rs` (0%) — the binary entry point: raw-mode terminal setup,
+  the crossterm event loop, and the relay reconnection loop. It needs a
+  real TTY and live Nostr relays.
+- `src/nostr/client.rs` (14% lines) — the network paths (`subscribe`,
+  `listen`, gift-wrap send/receive) need live relays; the offline logic
+  (connect validation, command failure paths, response correlation) is
+  covered.
+
+Excluding those two infrastructure-bound files, line coverage of the
+remaining code is **99.2%**.
+
+To verify the numbers yourself:
+
+```bash
+cargo install cargo-llvm-cov   # one-time setup
+cargo llvm-cov --workspace     # summary table per file
+cargo llvm-cov --workspace --html && open target/llvm-cov/html/index.html  # line-by-line report
+```
+
 ## Architecture
 
 ### Protocol

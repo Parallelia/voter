@@ -68,3 +68,55 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     ])
     .split(vertical[1])[1]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::render;
+    use crate::ui::test_support::{render_to_text, test_app};
+
+    // The dialog is a 50%x30% centered rect: at 80x24 the input row is
+    // squeezed out, so these tests render on a 100x40 terminal.
+
+    #[test]
+    fn renders_prompt_with_empty_input() {
+        // Arrange
+        let app = test_app();
+
+        // Act
+        let text = render_to_text(100, 40, |f| render(&app, f));
+
+        // Assert
+        assert!(text.contains("Unlock Identity"));
+        assert!(text.contains("Enter password to unlock your identity:"));
+        assert!(text.contains("Enter to submit"));
+        assert!(text.contains("█"));
+        assert!(!text.contains('*'));
+    }
+
+    #[test]
+    fn masks_typed_password_with_asterisks() {
+        // Arrange
+        let mut app = test_app();
+        app.password_input = "secret".to_string();
+
+        // Act
+        let text = render_to_text(100, 40, |f| render(&app, f));
+
+        // Assert: one asterisk per character, plaintext never shown
+        assert!(text.contains("******"));
+        assert!(!text.contains("secret"));
+    }
+
+    #[test]
+    fn renders_error_message_when_unlock_fails() {
+        // Arrange
+        let mut app = test_app();
+        app.error_message = Some("Unlock failed: bad password".to_string());
+
+        // Act
+        let text = render_to_text(100, 40, |f| render(&app, f));
+
+        // Assert
+        assert!(text.contains("Unlock failed: bad password"));
+    }
+}

@@ -151,3 +151,123 @@ fn ec_ok_omits_null_blind_signature() {
     assert!(!json.contains("blind_signature"));
     assert!(!json.contains("request_id"));
 }
+
+#[test]
+fn every_ec_error_code_has_a_human_readable_display_message() {
+    // Arrange: every variant paired with its expected display text.
+    let cases = [
+        (EcErrorCode::ElectionNotFound, "Election not found"),
+        (EcErrorCode::ElectionClosed, "Election is closed"),
+        (
+            EcErrorCode::InvalidToken,
+            "Invalid or used registration token",
+        ),
+        (
+            EcErrorCode::AlreadyRegistered,
+            "Already registered for this election",
+        ),
+        (
+            EcErrorCode::NotAuthorized,
+            "Not authorized (not registered)",
+        ),
+        (EcErrorCode::AlreadyIssued, "Token already issued"),
+        (
+            EcErrorCode::NonceAlreadyUsed,
+            "Nonce already used (double vote attempt)",
+        ),
+        (EcErrorCode::InvalidCandidate, "Invalid candidate ID"),
+        (
+            EcErrorCode::BallotInvalid,
+            "Ballot does not match election rules",
+        ),
+        (EcErrorCode::UnknownRules, "Unknown voting rules"),
+        (EcErrorCode::InvalidMessage, "Malformed message"),
+        (EcErrorCode::InternalError, "EC internal error"),
+        (EcErrorCode::Unknown, "Unknown error code"),
+    ];
+
+    for (code, expected) in cases {
+        // Act
+        let rendered = code.to_string();
+
+        // Assert
+        assert_eq!(rendered, expected);
+    }
+}
+
+#[test]
+fn unknown_error_code_string_deserializes_to_unknown_variant() {
+    let parsed: EcErrorCode = serde_json::from_str("\"BRAND_NEW_FUTURE_CODE\"").unwrap();
+
+    assert_eq!(parsed, EcErrorCode::Unknown);
+}
+
+#[test]
+fn request_id_accessor_returns_id_for_all_message_variants() {
+    // Arrange
+    let register = VoterMessage::Register {
+        election_id: "e1".to_string(),
+        registration_token: "t".to_string(),
+        request_id: "req-register".to_string(),
+    };
+    let request_token = VoterMessage::RequestToken {
+        election_id: "e1".to_string(),
+        blinded_nonce: "bn".to_string(),
+        request_id: "req-token".to_string(),
+    };
+    let cast_vote = VoterMessage::CastVote {
+        election_id: "e1".to_string(),
+        candidate_ids: vec![1],
+        h_n: "hn".to_string(),
+        token: "tok".to_string(),
+        request_id: "req-vote".to_string(),
+    };
+
+    // Act & Assert
+    assert_eq!(register.request_id(), "req-register");
+    assert_eq!(request_token.request_id(), "req-token");
+    assert_eq!(cast_vote.request_id(), "req-vote");
+}
+
+#[test]
+fn request_token_wire_format_matches_ec_protocol() {
+    // Arrange
+    let msg = VoterMessage::RequestToken {
+        election_id: "e1".to_string(),
+        blinded_nonce: "YmxpbmRlZA==".to_string(),
+        request_id: "req-2".to_string(),
+    };
+
+    // Act
+    let json: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+
+    // Assert
+    assert_eq!(json["action"], "request-token");
+    assert_eq!(json["election_id"], "e1");
+    assert_eq!(json["blinded_nonce"], "YmxpbmRlZA==");
+    assert_eq!(json["request_id"], "req-2");
+}
+
+#[test]
+fn cast_vote_wire_format_matches_ec_protocol() {
+    // Arrange
+    let msg = VoterMessage::CastVote {
+        election_id: "e1".to_string(),
+        candidate_ids: vec![3, 1],
+        h_n: "aa".repeat(32),
+        token: "dG9rZW4=".to_string(),
+        request_id: "req-3".to_string(),
+    };
+
+    // Act
+    let json: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+
+    // Assert
+    assert_eq!(json["action"], "cast-vote");
+    assert_eq!(json["candidate_ids"], serde_json::json!([3, 1]));
+    assert_eq!(json["h_n"], "aa".repeat(32));
+    assert_eq!(json["token"], "dG9rZW4=");
+    assert_eq!(json["request_id"], "req-3");
+}

@@ -159,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
     terminal.show_cursor()?;
 
     // Save state
-    let state_path = app.config.state_path();
+    let state_path = app.state_path.clone();
     app.persistent_state.save(&state_path)?;
 
     Ok(())

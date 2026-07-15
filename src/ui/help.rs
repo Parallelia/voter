@@ -99,3 +99,37 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     ])
     .split(vertical[1])[1]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::render_overlay;
+    use crate::ui::test_support::render_to_text;
+
+    #[test]
+    fn overlay_lists_all_section_headers_and_shortcuts() {
+        // Arrange / Act: tall terminal so every help line fits in the overlay
+        let text = render_to_text(100, 40, render_overlay);
+
+        // Assert: sections
+        assert!(text.contains("Keyboard Shortcuts"));
+        assert!(text.contains("Global"));
+        assert!(text.contains("Navigation"));
+        assert!(text.contains("Election List"));
+        assert!(text.contains("Election Detail"));
+        assert!(text.contains("Voting (STV)"));
+        // Assert: representative shortcuts
+        assert!(text.contains("Quit"));
+        assert!(text.contains("Toggle help"));
+        assert!(text.contains("Go back / cancel"));
+        assert!(text.contains("Move down"));
+        assert!(text.contains("Move up"));
+        assert!(text.contains("Open settings"));
+        assert!(text.contains("Enter registration token"));
+        assert!(text.contains("Request voting token"));
+        assert!(text.contains("Cast vote (if token available)"));
+        assert!(text.contains("View results"));
+        assert!(text.contains("Add candidate to ranking"));
+        assert!(text.contains("Remove from ranking"));
+        assert!(text.contains("Submit vote (with confirmation)"));
+    }
+}

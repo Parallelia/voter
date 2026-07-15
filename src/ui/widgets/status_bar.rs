@@ -77,3 +77,117 @@ pub fn render(app: &App, frame: &mut Frame) {
     .right_aligned();
     frame.render_widget(right, chunks[3]);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::render;
+    use crate::app::Screen;
+    use crate::ui::test_support::{render_to_text, test_app};
+
+    #[test]
+    fn shows_filled_dot_when_connected() {
+        // Arrange
+        let mut app = test_app();
+        app.connected = true;
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f));
+
+        // Assert
+        assert!(text.contains("●"));
+        assert!(!text.contains("○"));
+    }
+
+    #[test]
+    fn shows_empty_dot_when_disconnected() {
+        // Arrange
+        let app = test_app();
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f));
+
+        // Assert
+        assert!(text.contains("○"));
+        assert!(!text.contains("●"));
+    }
+
+    #[test]
+    fn warns_unpinned_when_ec_pubkey_is_not_configured() {
+        // Arrange: default config has no pinned EC pubkey
+        let app = test_app();
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f));
+
+        // Assert
+        assert!(text.contains("UNPINNED"));
+    }
+
+    #[test]
+    fn omits_unpinned_warning_when_ec_pubkey_is_pinned() {
+        // Arrange
+        let mut app = test_app();
+        app.config.nostr.ec_pubkey = Some("deadbeef".to_string());
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f));
+
+        // Assert
+        assert!(!text.contains("UNPINNED"));
+    }
+
+    #[test]
+    fn status_message_overrides_screen_name_in_middle_section() {
+        // Arrange
+        let mut app = test_app();
+        app.screen = Screen::ElectionList;
+        app.status_message = Some("Connected to relays".to_string());
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f));
+
+        // Assert: message in the middle, screen name still on the right
+        assert!(text.contains("Connected to relays"));
+        assert!(text.contains("Elections"));
+    }
+
+    #[test]
+    fn shows_screen_name_for_every_screen_variant() {
+        // Arrange
+        let cases = [
+            (Screen::Welcome, "Setup"),
+            (Screen::PasswordPrompt, "Unlock"),
+            (Screen::ElectionList, "Elections"),
+            (
+                Screen::ElectionDetail {
+                    election_id: "e1".to_string(),
+                },
+                "Detail",
+            ),
+            (
+                Screen::Vote {
+                    election_id: "e1".to_string(),
+                },
+                "Vote",
+            ),
+            (
+                Screen::Results {
+                    election_id: "e1".to_string(),
+                },
+                "Results",
+            ),
+            (Screen::Settings, "Settings"),
+        ];
+
+        for (screen, expected) in cases {
+            let mut app = test_app();
+            app.screen = screen;
+
+            // Act
+            let text = render_to_text(80, 24, |f| render(&app, f));
+
+            // Assert
+            assert!(text.contains(expected), "missing screen name: {expected}");
+        }
+    }
+}
