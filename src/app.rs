@@ -274,6 +274,12 @@ impl App {
 
     fn handle_password_key(&mut self, key: KeyCode) {
         match key {
+            // The only exit hatch: `q` is disabled while typing (it would be
+            // part of the password) and Ctrl+C arrives as a plain 'c' — a
+            // user who cannot supply the password must still be able to quit.
+            KeyCode::Esc => {
+                let _ = self.action_tx.send(Action::Quit);
+            }
             KeyCode::Enter => {
                 let path = self.config.identity.path.clone();
                 let password = self.password_input.clone();
@@ -966,6 +972,23 @@ mod tests {
         app.handle_nostr(NostrAction::RequestTimeout(42));
         assert!(app.pending.is_none());
         assert!(!app.is_loading);
+    }
+
+    /// Esc on the password prompt must quit the app. Global `q` is disabled
+    /// while typing and Ctrl+C arrives as a plain 'c' in raw mode, so without
+    /// this a user who cannot supply the password is trapped in the
+    /// alternate screen and has to kill the process externally.
+    #[test]
+    fn password_prompt_esc_quits_the_app() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), AppState::default(), tx);
+        app.screen = Screen::PasswordPrompt;
+        app.password_input = "half-typed".to_string();
+
+        app.handle_key(KeyCode::Esc);
+
+        let action = rx.try_recv().expect("Esc must emit an action");
+        assert!(matches!(action, Action::Quit), "Esc must request quit");
     }
 
     /// Pressing `g` on the Welcome screen must never overwrite an existing
