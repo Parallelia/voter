@@ -69,25 +69,81 @@ pub fn save_identity(keys: &Keys, password: Option<&str>, path: &Path) -> Result
 /// Write a file readable only by its owner (0600 on Unix).
 /// Also used for the persistent state file, which stores voting tokens
 /// (bearer credentials).
-#[cfg(unix)]
+///
+/// The write is atomic: data goes to a fresh temp file in the same directory
+/// (created 0600, so secrets are never world-readable even transiently),
+/// is flushed to disk, and then renamed over the destination. A crash
+/// mid-write can never leave a truncated or empty file — for state.json
+/// that would destroy the voter's only voting token, which the EC will
+/// not reissue.
 pub(crate) fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    // mode() only applies when the file is created; a pre-existing identity
-    // file (e.g. written by an older version) may carry broader permissions.
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(data)?;
+    let tmp_path = temp_sibling_path(path)?;
+    let write_result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let mut file = options.open(&tmp_path)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    finish_atomic_write(write_result, &tmp_path, path)
+}
+
+/// A unique temp path next to `path` (same directory, so the final rename
+/// stays on one filesystem and is atomic).
+fn temp_sibling_path(path: &Path) -> Result<std::path::PathBuf> {
+    let mut rand_bytes = [0u8; 8];
+    getrandom::fill(&mut rand_bytes)
+        .map_err(|e| VoterError::Identity(format!("system RNG unavailable: {e}")))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| VoterError::Identity(format!("invalid path: {}", path.display())))?;
+    let tmp_name = format!(
+        ".{}.tmp-{}",
+        file_name.to_string_lossy(),
+        hex::encode(rand_bytes)
+    );
+    Ok(path.with_file_name(tmp_name))
+}
+
+/// Complete an atomic write: rename the temp file over the destination on
+/// success, remove it on failure. After the rename the parent directory is
+/// fsynced — without it a crash can lose the rename itself and leave the
+/// old (or no) file behind even though the write appeared to succeed.
+fn finish_atomic_write(write_result: Result<()>, tmp_path: &Path, path: &Path) -> Result<()> {
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(tmp_path);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(tmp_path, path) {
+        let _ = std::fs::remove_file(tmp_path);
+        return Err(e.into());
+    }
+    sync_parent_dir(path)
+}
+
+/// Fsync the directory containing `path` so a completed rename is durable.
+/// Directories cannot be opened for writing on Windows; the rename itself
+/// is the durability boundary there.
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| VoterError::Identity(format!("invalid path: {}", path.display())))?;
+    std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-pub(crate) fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
-    std::fs::write(path, data)?;
+fn sync_parent_dir(_path: &Path) -> Result<()> {
     Ok(())
 }
 

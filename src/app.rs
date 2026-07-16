@@ -246,8 +246,19 @@ impl App {
     fn handle_welcome_key(&mut self, key: KeyCode) {
         match key {
             KeyCode::Char('1') | KeyCode::Char('g') => {
-                let keys = voter::identity::generate_keypair();
                 let path = self.config.identity.path.clone();
+                // Reaching Welcome with an identity on disk means loading it
+                // failed; overwriting would destroy the registered voter key
+                // and every registration bound to it.
+                if voter::identity::identity_exists(&path) {
+                    self.error_message = Some(format!(
+                        "An identity already exists at {} but could not be loaded. \
+                         Refusing to overwrite it — fix or move the file, then restart.",
+                        path.display()
+                    ));
+                    return;
+                }
+                let keys = voter::identity::generate_keypair();
                 match voter::identity::save_identity(&keys, None, &path) {
                     Ok(()) => {
                         let pubkey = voter::identity::export_public_key(&keys);
@@ -268,6 +279,12 @@ impl App {
 
     fn handle_password_key(&mut self, key: KeyCode) {
         match key {
+            // The only exit hatch: `q` is disabled while typing (it would be
+            // part of the password) and Ctrl+C arrives as a plain 'c' — a
+            // user who cannot supply the password must still be able to quit.
+            KeyCode::Esc => {
+                let _ = self.action_tx.send(Action::Quit);
+            }
             KeyCode::Enter => {
                 let path = self.config.identity.path.clone();
                 let password = self.password_input.clone();
@@ -334,7 +351,10 @@ impl App {
                     self.token_input.clear();
                 }
                 KeyCode::Enter => {
-                    if !self.token_input.is_empty() {
+                    // Trim first: a whitespace-only input would be trimmed to
+                    // "" by submit_registration and sent to the EC anyway — a
+                    // guaranteed error (or 30 s timeout) instead of a no-op.
+                    if !self.token_input.trim().is_empty() {
                         self.submit_registration(&eid);
                     }
                 }
@@ -1071,6 +1091,91 @@ mod tests {
         app.handle_nostr(NostrAction::RequestTimeout(42));
         assert!(app.pending.is_none());
         assert!(!app.is_loading);
+    }
+
+    /// A whitespace-only registration token must be a local no-op: it would
+    /// be trimmed to "" and sent to the EC as an empty token, guaranteeing an
+    /// error (or a 30 s timeout) instead of local rejection.
+    #[test]
+    fn whitespace_only_registration_token_is_not_submitted() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), AppState::default(), tx);
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+        app.editing_token = true;
+        app.token_input = "   ".to_string();
+
+        app.handle_key(KeyCode::Enter);
+
+        assert!(app.pending.is_none(), "no request may be started");
+        assert!(app.editing_token, "input mode stays active for correction");
+    }
+
+    /// Esc on the password prompt must quit the app. Global `q` is disabled
+    /// while typing and Ctrl+C arrives as a plain 'c' in raw mode, so without
+    /// this a user who cannot supply the password is trapped in the
+    /// alternate screen and has to kill the process externally.
+    #[test]
+    fn password_prompt_esc_quits_the_app() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new(AppConfig::default(), AppState::default(), tx);
+        app.screen = Screen::PasswordPrompt;
+        app.password_input = "half-typed".to_string();
+
+        app.handle_key(KeyCode::Esc);
+
+        let action = rx.try_recv().expect("Esc must emit an action");
+        assert!(matches!(action, Action::Quit), "Esc must request quit");
+    }
+
+    /// Pressing `g` on the Welcome screen must never overwrite an existing
+    /// identity file. Reaching Welcome with an identity on disk means loading
+    /// it failed (transient I/O error, corrupt-but-recoverable JSON);
+    /// generating a new key would destroy the registered voter key and every
+    /// registration bound to it.
+    #[test]
+    fn welcome_generate_refuses_to_overwrite_existing_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.json");
+        std::fs::write(&path, "{corrupt-but-recoverable").unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut config = AppConfig::default();
+        config.identity.path = path.clone();
+        let mut app = App::new(config, AppState::default(), tx);
+        app.screen = Screen::Welcome;
+
+        app.handle_key(KeyCode::Char('g'));
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{corrupt-but-recoverable",
+            "existing identity file must not be touched"
+        );
+        assert!(app.keys.is_none(), "no new key may be generated");
+        assert!(app.error_message.is_some(), "user must be told why");
+    }
+
+    /// Same guard when only the encrypted sidecar exists: `identity.age`
+    /// present but `identity.json` absent must also block generation.
+    #[test]
+    fn welcome_generate_refuses_when_encrypted_identity_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.json");
+        std::fs::write(path.with_extension("age"), b"age-data").unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut config = AppConfig::default();
+        config.identity.path = path.clone();
+        let mut app = App::new(config, AppState::default(), tx);
+        app.screen = Screen::Welcome;
+
+        app.handle_key(KeyCode::Char('g'));
+
+        assert!(app.keys.is_none());
+        assert!(app.error_message.is_some());
+        assert!(!path.exists(), "no plaintext identity may be created");
     }
 
     /// Same for failures reported by the Nostr task.

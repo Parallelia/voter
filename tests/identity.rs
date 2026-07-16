@@ -219,3 +219,53 @@ fn load_encrypted_identity_without_password_fails() {
     // Assert
     assert!(result.is_err());
 }
+
+/// Secret files (identity, state) must be written atomically: the destination
+/// is replaced via rename, never truncated in place. A crash mid-write must
+/// never leave a corrupt or empty file — for state.json that would destroy
+/// the voter's only voting token (the EC will not reissue it).
+///
+/// Rename-based replacement is observable as a new inode; in-place truncation
+/// (the buggy behavior) keeps the same inode.
+#[cfg(unix)]
+#[test]
+fn save_identity_replaces_file_atomically_via_rename() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("identity.json");
+
+    let keys = identity::generate_keypair();
+    identity::save_identity(&keys, None, &path).unwrap();
+    let inode_before = std::fs::metadata(&path).unwrap().ino();
+
+    identity::save_identity(&keys, None, &path).unwrap();
+    let inode_after = std::fs::metadata(&path).unwrap().ino();
+
+    assert_ne!(
+        inode_before, inode_after,
+        "secret file must be replaced via rename (new inode), not truncated in place"
+    );
+}
+
+/// After a successful save no temporary files may be left behind in the
+/// directory — only the final identity file.
+#[test]
+fn save_identity_leaves_no_temp_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("identity.json");
+
+    let keys = identity::generate_keypair();
+    identity::save_identity(&keys, None, &path).unwrap();
+    identity::save_identity(&keys, None, &path).unwrap();
+
+    let entries: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        entries,
+        vec!["identity.json".to_string()],
+        "no temp files may remain after saving"
+    );
+}
