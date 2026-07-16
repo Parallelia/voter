@@ -56,3 +56,11 @@ fn error_response_echoing_the_request_id_matches() {
 fn error_response_without_echo_does_not_match() {
     assert!(!response_echoes_request_id(&error_response(None), "req-1"));
 }
+
+#[test]
+fn error_response_with_stale_echo_does_not_match() {
+    assert!(!response_echoes_request_id(
+        &error_response(Some("req-OLD")),
+        "req-1"
+    ));
+}
