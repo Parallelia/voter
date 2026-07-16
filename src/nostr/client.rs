@@ -43,6 +43,19 @@ pub enum VoterCommand {
     },
 }
 
+/// Whether an EC response echoes the given request correlation id.
+///
+/// Responses that do not echo the id (including legacy responses without
+/// one) must never terminate a wait for a specific request: the app rejects
+/// them as uncorrelated, so accepting them here would silently disarm the
+/// timeout and leave the request pending forever.
+pub fn response_echoes_request_id(response: &EcResponse, request_id: &str) -> bool {
+    let echoed = match response {
+        EcResponse::Ok { request_id, .. } | EcResponse::Error { request_id, .. } => request_id,
+    };
+    echoed.as_deref() == Some(request_id)
+}
+
 /// Wraps the nostr-sdk Client for voter-specific operations.
 pub struct NostrVoterClient {
     client: Client,
@@ -226,7 +239,16 @@ impl NostrVoterClient {
                     continue;
                 }
                 match serde_json::from_str::<EcResponse>(unwrapped.rumor.content.as_str()) {
-                    Ok(response) => return Ok(response),
+                    // Only the reply to THIS request may end the wait. A
+                    // reply without the echoed id would be rejected by the
+                    // app as uncorrelated; returning it here would disarm
+                    // the timeout and strand the request forever.
+                    Ok(response) => {
+                        if response_echoes_request_id(&response, msg.request_id()) {
+                            return Ok(response);
+                        }
+                        warn!("ignoring EC reply that does not echo the request id");
+                    }
                     Err(e) => warn!(error = %e, "failed to parse EC reply"),
                 }
             }
