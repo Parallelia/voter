@@ -98,9 +98,10 @@ pub struct App {
     pub cmd_tx: Option<mpsc::UnboundedSender<VoterCommand>>,
     pub pending: Option<PendingRequest>,
     pub pending_blind: Option<PendingBlind>,
-    /// Where persistent state is saved. Injected so tests never touch the
-    /// user's real ~/.config/voter/state.json.
-    pub state_path: std::path::PathBuf,
+    /// Where persistent state is saved. Private so production code cannot
+    /// re-point it; the in-file test module overrides it with a tempdir so
+    /// tests never touch the user's real ~/.config/voter/state.json.
+    state_path: std::path::PathBuf,
     next_task_id: u64,
 }
 
@@ -139,6 +140,11 @@ impl App {
             state_path,
             next_task_id: 0,
         }
+    }
+
+    /// Path where persistent state is saved.
+    pub fn state_path(&self) -> &std::path::Path {
+        &self.state_path
     }
 
     /// Process an action and return whether the app should quit.

@@ -141,7 +141,8 @@ To verify the numbers yourself:
 ```bash
 cargo install cargo-llvm-cov   # one-time setup
 cargo llvm-cov --workspace     # summary table per file
-cargo llvm-cov --workspace --html && open target/llvm-cov/html/index.html  # line-by-line report
+cargo llvm-cov --workspace --html               # line-by-line report
+xdg-open target/llvm-cov/html/index.html        # Linux (macOS: use `open`)
 ```
 
 ## Architecture
