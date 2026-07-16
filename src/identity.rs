@@ -76,31 +76,19 @@ pub fn save_identity(keys: &Keys, password: Option<&str>, path: &Path) -> Result
 /// mid-write can never leave a truncated or empty file — for state.json
 /// that would destroy the voter's only voting token, which the EC will
 /// not reissue.
-#[cfg(unix)]
 pub(crate) fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
     let tmp_path = temp_sibling_path(path)?;
     let write_result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp_path)?;
-        file.write_all(data)?;
-        file.sync_all()?;
-        Ok(())
-    })();
-    finish_atomic_write(write_result, &tmp_path, path)
-}
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
 
-#[cfg(not(unix))]
-pub(crate) fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
-    let tmp_path = temp_sibling_path(path)?;
-    let write_result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let mut file = options.open(&tmp_path)?;
         file.write_all(data)?;
         file.sync_all()?;
         Ok(())
@@ -126,7 +114,9 @@ fn temp_sibling_path(path: &Path) -> Result<std::path::PathBuf> {
 }
 
 /// Complete an atomic write: rename the temp file over the destination on
-/// success, remove it on failure.
+/// success, remove it on failure. After the rename the parent directory is
+/// fsynced — without it a crash can lose the rename itself and leave the
+/// old (or no) file behind even though the write appeared to succeed.
 fn finish_atomic_write(write_result: Result<()>, tmp_path: &Path, path: &Path) -> Result<()> {
     if let Err(e) = write_result {
         let _ = std::fs::remove_file(tmp_path);
@@ -136,6 +126,24 @@ fn finish_atomic_write(write_result: Result<()>, tmp_path: &Path, path: &Path) -
         let _ = std::fs::remove_file(tmp_path);
         return Err(e.into());
     }
+    sync_parent_dir(path)
+}
+
+/// Fsync the directory containing `path` so a completed rename is durable.
+/// Directories cannot be opened for writing on Windows; the rename itself
+/// is the durability boundary there.
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| VoterError::Identity(format!("invalid path: {}", path.display())))?;
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> Result<()> {
     Ok(())
 }
 
