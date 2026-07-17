@@ -80,7 +80,7 @@ mod tests {
     #[test]
     fn renders_prompt_with_empty_input() {
         // Arrange
-        let app = test_app();
+        let (app, _dir) = test_app();
 
         // Act
         let text = render_to_text(100, 40, |f| render(&app, f));
@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn masks_typed_password_with_asterisks() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.password_input = "secret".to_string();
 
         // Act
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn renders_error_message_when_unlock_fails() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.error_message = Some("Unlock failed: bad password".to_string());
 
         // Act

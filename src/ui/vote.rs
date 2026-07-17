@@ -177,7 +177,7 @@ mod tests {
     use voter::nostr::events::ElectionStatus;
 
     fn app_with_rules(rules_id: &str) -> crate::app::App {
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.elections.insert(
             "e1".to_string(),
             sample_election("e1", "Board Election", ElectionStatus::InProgress, rules_id),
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn renders_nothing_for_unknown_election() {
         // Arrange
-        let app = test_app();
+        let (app, _dir) = test_app();
 
         // Act
         let text = render_to_text(80, 24, |f| render(&app, f, "missing"));

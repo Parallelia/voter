@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn renders_relays_theme_and_placeholder_identity() {
         // Arrange
-        let app = test_app();
+        let (app, _dir) = test_app();
 
         // Act
         let text = render_to_text(80, 24, |f| render(&app, f));
@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn renders_truncated_public_key_when_identity_is_loaded() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         let keys = voter::identity::generate_keypair();
         let expected_prefix = voter::identity::export_public_key(&keys)[..16].to_string();
         app.keys = Some(keys);

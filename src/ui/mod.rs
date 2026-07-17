@@ -47,9 +47,16 @@ pub mod test_support {
     use voter::state::{AppState, VoterRegistration};
 
     /// Build an App with default config/state and a dangling action channel.
-    pub fn test_app() -> App {
+    ///
+    /// Persistence is redirected into the returned tempdir so any
+    /// save_state()-triggering test can never write to the user's real config
+    /// dir; keep the guard bound (e.g. `_dir`) so it lives for the test.
+    pub fn test_app() -> (App, tempfile::TempDir) {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        App::new(AppConfig::default(), AppState::default(), tx)
+        let mut app = App::new(AppConfig::default(), AppState::default(), tx);
+        let dir = tempfile::tempdir().expect("create tempdir");
+        app.set_state_path(dir.path().join("state.json"));
+        (app, dir)
     }
 
     /// Draw a single frame with the given render closure on a test backend.
@@ -144,7 +151,7 @@ mod tests {
     #[test]
     fn render_dispatches_to_welcome_screen_with_status_bar() {
         // Arrange
-        let app = test_app();
+        let (app, _dir) = test_app();
 
         // Act
         let text = render_to_text(80, 24, |f| super::render(&app, f));
@@ -157,7 +164,7 @@ mod tests {
     #[test]
     fn render_dispatches_to_password_prompt_screen() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.screen = Screen::PasswordPrompt;
 
         // Act
@@ -171,7 +178,7 @@ mod tests {
     #[test]
     fn render_dispatches_to_election_list_screen() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.screen = Screen::ElectionList;
 
         // Act
@@ -185,7 +192,7 @@ mod tests {
     #[test]
     fn render_dispatches_to_election_detail_screen() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.screen = Screen::ElectionDetail {
             election_id: "missing".to_string(),
         };
@@ -201,7 +208,7 @@ mod tests {
     #[test]
     fn render_dispatches_to_vote_screen() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.screen = Screen::Vote {
             election_id: "missing".to_string(),
         };
@@ -216,7 +223,7 @@ mod tests {
     #[test]
     fn render_dispatches_to_results_screen() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.screen = Screen::Results {
             election_id: "missing".to_string(),
         };
@@ -232,7 +239,7 @@ mod tests {
     #[test]
     fn render_dispatches_to_settings_screen() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.screen = Screen::Settings;
 
         // Act
@@ -246,7 +253,7 @@ mod tests {
     #[test]
     fn render_draws_help_overlay_when_toggled_on() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.screen = Screen::ElectionList;
         app.show_help = true;
 
@@ -260,7 +267,7 @@ mod tests {
     #[test]
     fn render_always_shows_connection_indicator_in_status_bar() {
         // Arrange
-        let app = test_app();
+        let (app, _dir) = test_app();
 
         // Act
         let text = render_to_text(80, 24, |f| super::render(&app, f));

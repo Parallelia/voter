@@ -147,6 +147,13 @@ impl App {
         &self.state_path
     }
 
+    /// Redirect persistent state into an isolated location so tests can never
+    /// write to the user's real config dir.
+    #[cfg(test)]
+    pub(crate) fn set_state_path(&mut self, path: std::path::PathBuf) {
+        self.state_path = path;
+    }
+
     /// Process an action and return whether the app should quit.
     pub fn update(&mut self, action: Action) -> ShouldQuit {
         // Clear transient errors on user actions, but preserve connection errors
@@ -833,19 +840,6 @@ mod tests {
     use voter::crypto::blind_rsa;
     use voter::nostr::events::Candidate;
 
-    fn test_app() -> App {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let mut app = App::new(AppConfig::default(), AppState::default(), tx);
-        // Redirect persistence into a tempdir: handlers that succeed call
-        // save_state(), which must never touch the user's real config dir.
-        // The tempdir handle is intentionally leaked so the path stays valid
-        // for the whole test; the OS reclaims it with the temp filesystem.
-        let dir = tempfile::tempdir().expect("create tempdir");
-        app.state_path = dir.path().join("state.json");
-        std::mem::forget(dir);
-        app
-    }
-
     /// An App fully isolated inside a tempdir: both the persistent state path
     /// and the identity path point into the tempdir, so no test can ever read
     /// or write the user's real ~/.config/voter files.
@@ -959,7 +953,7 @@ mod tests {
     /// arrives, permanently burning the voter's token slot.
     #[test]
     fn mismatched_ok_response_does_not_consume_pending() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::RequestToken);
 
         app.handle_ec_response(&EcResponse::Ok {
@@ -977,7 +971,7 @@ mod tests {
     /// matching alone cannot tell two requests of the same kind apart.
     #[test]
     fn ok_with_stale_request_id_does_not_consume_pending() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::Register);
 
         app.handle_ec_response(&EcResponse::Ok {
@@ -994,7 +988,7 @@ mod tests {
     /// pending state.
     #[test]
     fn ok_with_matching_request_id_consumes_pending() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::Register);
 
         app.handle_ec_response(&EcResponse::Ok {
@@ -1014,7 +1008,7 @@ mod tests {
     /// ids the request fails via the send timeout instead.
     #[test]
     fn error_without_request_id_does_not_clear_pending() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::Register);
 
         app.handle_ec_response(&EcResponse::Error {
@@ -1033,7 +1027,7 @@ mod tests {
     /// state — action matching alone cannot tell two requests apart.
     #[test]
     fn ok_without_request_id_does_not_consume_pending() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::Register);
 
         app.handle_ec_response(&EcResponse::Ok {
@@ -1051,7 +1045,7 @@ mod tests {
     /// drop the blinding secret needed for the real blind signature.
     #[test]
     fn error_with_stale_request_id_leaves_pending_untouched() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::RequestToken);
 
         app.handle_ec_response(&EcResponse::Error {
@@ -1071,7 +1065,7 @@ mod tests {
     /// An error echoing the in-flight request_id fails that request.
     #[test]
     fn error_with_matching_request_id_clears_pending() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::Register);
 
         app.handle_ec_response(&EcResponse::Error {
@@ -1088,7 +1082,7 @@ mod tests {
     /// A timeout for a previous request must not cancel a newer one.
     #[test]
     fn stale_timeout_is_ignored_matching_timeout_clears() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::CastVote);
 
         app.handle_nostr(NostrAction::RequestTimeout(41));
@@ -1187,7 +1181,7 @@ mod tests {
     /// Same for failures reported by the Nostr task.
     #[test]
     fn stale_failure_is_ignored_matching_failure_clears() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::RequestToken);
 
         app.handle_nostr(NostrAction::RequestFailed(7, "boom".to_string()));

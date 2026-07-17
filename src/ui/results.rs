@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn shows_placeholder_when_results_are_missing() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.elections.insert(
             "e1".to_string(),
             sample_election(
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn renders_tally_sorted_descending_with_winner_badge_and_vote_formats() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.elections.insert(
             "e1".to_string(),
             sample_election("e1", "Board Election", ElectionStatus::Finished, "stv"),
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn falls_back_to_unknown_for_missing_election_and_candidate_names() {
         // Arrange: results exist but the election announcement was never seen
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.results.insert(
             "e1".to_string(),
             ElectionResults {

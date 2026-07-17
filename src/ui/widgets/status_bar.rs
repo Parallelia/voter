@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn shows_filled_dot_when_connected() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.connected = true;
 
         // Act
@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn shows_empty_dot_when_disconnected() {
         // Arrange
-        let app = test_app();
+        let (app, _dir) = test_app();
 
         // Act
         let text = render_to_text(80, 24, |f| render(&app, f));
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn warns_unpinned_when_ec_pubkey_is_not_configured() {
         // Arrange: default config has no pinned EC pubkey
-        let app = test_app();
+        let (app, _dir) = test_app();
 
         // Act
         let text = render_to_text(80, 24, |f| render(&app, f));
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn omits_unpinned_warning_when_ec_pubkey_is_pinned() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.config.nostr.ec_pubkey = Some("deadbeef".to_string());
 
         // Act
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn status_message_overrides_screen_name_in_middle_section() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.screen = Screen::ElectionList;
         app.status_message = Some("Connected to relays".to_string());
 
@@ -180,7 +180,7 @@ mod tests {
         ];
 
         for (screen, expected) in cases {
-            let mut app = test_app();
+            let (mut app, _dir) = test_app();
             app.screen = screen;
 
             // Act

@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn renders_placeholder_and_hints_when_no_elections_exist() {
         // Arrange
-        let app = test_app();
+        let (app, _dir) = test_app();
 
         // Act
         let text = render_to_text(80, 24, |f| render(&app, f));
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn renders_every_status_variant_with_name_and_candidate_count() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         for (id, name, status) in [
             ("e1", "Alpha", ElectionStatus::Open),
             ("e2", "Beta", ElectionStatus::InProgress),
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn highlights_selected_row_with_reversed_style() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.elections.insert(
             "e1".to_string(),
             sample_election("e1", "Alpha", ElectionStatus::Open, "plurality"),
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn shows_voted_and_registered_badges() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.elections.insert(
             "e1".to_string(),
             sample_election("e1", "Alpha", ElectionStatus::Finished, "plurality"),

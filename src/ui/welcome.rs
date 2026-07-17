@@ -83,7 +83,7 @@ mod tests {
     #[test]
     fn renders_title_and_identity_options() {
         // Arrange
-        let app = test_app();
+        let (app, _dir) = test_app();
 
         // Act
         let text = render_to_text(80, 24, |f| render(&app, f));
@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn renders_error_message_when_present() {
         // Arrange
-        let mut app = test_app();
+        let (mut app, _dir) = test_app();
         app.error_message = Some("Failed to save identity".to_string());
 
         // Act: taller terminal so the error chunk gets rows
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn omits_error_line_when_no_error_is_set() {
         // Arrange
-        let app = test_app();
+        let (app, _dir) = test_app();
 
         // Act
         let text = render_to_text(80, 40, |f| render(&app, f));
