@@ -90,3 +90,56 @@ fn formats_unix_timestamps_as_utc() {
     // Leap-year day
     assert_eq!(format_unix_utc(1_709_164_800), "2024-02-29 00:00 UTC");
 }
+
+#[test]
+fn formats_negative_timestamp_before_epoch() {
+    assert_eq!(format_unix_utc(-86_400), "1969-12-31 00:00 UTC");
+}
+
+#[test]
+fn formats_end_of_year_timestamp() {
+    // 2023-12-31T23:59:59Z — seconds are truncated to the minute.
+    assert_eq!(format_unix_utc(1_704_067_199), "2023-12-31 23:59 UTC");
+}
+
+#[test]
+fn election_status_display_covers_all_variants() {
+    let cases = [
+        (ElectionStatus::Open, "Open"),
+        (ElectionStatus::InProgress, "In Progress"),
+        (ElectionStatus::Finished, "Finished"),
+        (ElectionStatus::Cancelled, "Cancelled"),
+    ];
+
+    for (status, expected) in cases {
+        assert_eq!(status.to_string(), expected);
+    }
+}
+
+/// `ec_pubkey` is `#[serde(skip)]`: it must stay `None` after deserialization
+/// even if a malicious event embeds an `ec_pubkey` field in the JSON body.
+#[test]
+fn election_ec_pubkey_is_never_taken_from_json() {
+    let json = r#"{
+        "election_id": "e1",
+        "name": "Test Election",
+        "start_time": 1751932800,
+        "end_time": 1751936400,
+        "status": "open",
+        "rules_id": "plurality",
+        "rsa_pub_key": "AAAA",
+        "candidates": [{"id": 1, "name": "Alice"}],
+        "ec_pubkey": "attacker-controlled"
+    }"#;
+
+    let election: Election = serde_json::from_str(json).unwrap();
+
+    assert_eq!(election.ec_pubkey, None);
+}
+
+#[test]
+fn unknown_election_status_string_fails_to_parse() {
+    let result = serde_json::from_str::<ElectionStatus>("\"paused\"");
+
+    assert!(result.is_err());
+}

@@ -74,3 +74,74 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     ])
     .split(vertical[1])[1]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::render;
+    use crate::ui::test_support::{buffer_text, render_to_terminal};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+
+    fn message_lines() -> Vec<String> {
+        vec![
+            "You are about to cast your vote:".to_string(),
+            String::new(),
+            "  Alice".to_string(),
+            "This cannot be undone.".to_string(),
+        ]
+    }
+
+    fn has_cell_with_bg(terminal: &Terminal<TestBackend>, bg: Color) -> bool {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.bg == bg)
+    }
+
+    #[test]
+    fn renders_title_message_lines_and_both_buttons() {
+        // Arrange
+        let lines = message_lines();
+
+        // Act
+        let terminal = render_to_terminal(80, 40, |f| render(f, "Confirm Vote", &lines, true));
+        let text = buffer_text(&terminal);
+
+        // Assert
+        assert!(text.contains("Confirm Vote"));
+        assert!(text.contains("You are about to cast your vote:"));
+        assert!(text.contains("Alice"));
+        assert!(text.contains("This cannot be undone."));
+        assert!(text.contains("Confirm"));
+        assert!(text.contains("Go Back"));
+    }
+
+    #[test]
+    fn highlights_confirm_button_when_focused() {
+        // Arrange
+        let lines = message_lines();
+
+        // Act
+        let terminal = render_to_terminal(80, 40, |f| render(f, "Confirm Vote", &lines, true));
+
+        // Assert: focused Confirm gets a green background, Go Back stays plain
+        assert!(has_cell_with_bg(&terminal, Color::Green));
+        assert!(!has_cell_with_bg(&terminal, Color::Red));
+    }
+
+    #[test]
+    fn highlights_go_back_button_when_confirm_is_not_focused() {
+        // Arrange
+        let lines = message_lines();
+
+        // Act
+        let terminal = render_to_terminal(80, 40, |f| render(f, "Confirm Vote", &lines, false));
+
+        // Assert: focused Go Back gets a red background, Confirm stays plain
+        assert!(has_cell_with_bg(&terminal, Color::Red));
+        assert!(!has_cell_with_bg(&terminal, Color::Green));
+    }
+}

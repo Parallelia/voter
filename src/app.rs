@@ -98,6 +98,10 @@ pub struct App {
     pub cmd_tx: Option<mpsc::UnboundedSender<VoterCommand>>,
     pub pending: Option<PendingRequest>,
     pub pending_blind: Option<PendingBlind>,
+    /// Where persistent state is saved. Private so production code cannot
+    /// re-point it; the in-file test module overrides it with a tempdir so
+    /// tests never touch the user's real ~/.config/voter/state.json.
+    state_path: std::path::PathBuf,
     next_task_id: u64,
 }
 
@@ -107,6 +111,7 @@ impl App {
         persistent_state: AppState,
         action_tx: mpsc::UnboundedSender<Action>,
     ) -> Self {
+        let state_path = config.state_path();
         Self {
             screen: Screen::Welcome,
             previous_screen: None,
@@ -132,8 +137,21 @@ impl App {
             cmd_tx: None,
             pending: None,
             pending_blind: None,
+            state_path,
             next_task_id: 0,
         }
+    }
+
+    /// Path where persistent state is saved.
+    pub fn state_path(&self) -> &std::path::Path {
+        &self.state_path
+    }
+
+    /// Redirect persistent state into an isolated location so tests can never
+    /// write to the user's real config dir.
+    #[cfg(test)]
+    pub(crate) fn set_state_path(&mut self, path: std::path::PathBuf) {
+        self.state_path = path;
     }
 
     /// Process an action and return whether the app should quit.
@@ -774,7 +792,7 @@ impl App {
     }
 
     fn save_state(&mut self) {
-        let path = self.config.state_path();
+        let path = self.state_path.clone();
         if let Err(e) = self.persistent_state.save(&path) {
             self.error_message = Some(format!("Failed to save state: {e}"));
         }
@@ -815,9 +833,107 @@ fn format_ec_response(response: &EcResponse) -> String {
 mod tests {
     use super::*;
 
-    fn test_app() -> App {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        App::new(AppConfig::default(), AppState::default(), tx)
+    use base64::prelude::*;
+    use tempfile::TempDir;
+
+    use voter::config::IdentityConfig;
+    use voter::crypto::blind_rsa;
+    use voter::nostr::events::Candidate;
+
+    /// An App fully isolated inside a tempdir: both the persistent state path
+    /// and the identity path point into the tempdir, so no test can ever read
+    /// or write the user's real ~/.config/voter files.
+    fn isolated_app() -> (App, mpsc::UnboundedReceiver<Action>, TempDir) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let config = AppConfig {
+            identity: IdentityConfig {
+                path: dir.path().join("identity.json"),
+            },
+            ..AppConfig::default()
+        };
+        let mut app = App::new(config, AppState::default(), tx);
+        app.state_path = dir.path().join("state.json");
+        (app, rx, dir)
+    }
+
+    fn press(app: &mut App, key: KeyCode) {
+        app.update(Action::KeyPress(key));
+    }
+
+    fn attach_cmd_channel(app: &mut App) -> mpsc::UnboundedReceiver<VoterCommand> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        app.cmd_tx = Some(tx);
+        rx
+    }
+
+    fn plurality_election(id: &str, name: &str, status: ElectionStatus) -> Election {
+        Election {
+            election_id: id.to_string(),
+            name: name.to_string(),
+            start_time: 1_700_000_000,
+            end_time: 1_700_086_400,
+            status,
+            rules_id: "plurality".to_string(),
+            rsa_pub_key: "unused".to_string(),
+            candidates: vec![
+                Candidate {
+                    id: 1,
+                    name: "Alice".to_string(),
+                },
+                Candidate {
+                    id: 2,
+                    name: "Bob".to_string(),
+                },
+            ],
+            ec_pubkey: Some("ec-pubkey-hex".to_string()),
+        }
+    }
+
+    fn stv_election(id: &str, name: &str) -> Election {
+        let base = plurality_election(id, name, ElectionStatus::InProgress);
+        Election {
+            rules_id: "stv".to_string(),
+            candidates: vec![
+                Candidate {
+                    id: 1,
+                    name: "Alice".to_string(),
+                },
+                Candidate {
+                    id: 2,
+                    name: "Bob".to_string(),
+                },
+                Candidate {
+                    id: 3,
+                    name: "Carol".to_string(),
+                },
+            ],
+            ..base
+        }
+    }
+
+    /// An election whose rsa_pub_key is a real base64-DER key, plus the
+    /// matching secret key so a test can play the EC's blind-signer role
+    /// (mirrors tests/token_flow.rs).
+    fn rsa_election(id: &str, status: ElectionStatus) -> (Election, blind_rsa::BrsaSk) {
+        let (pk, sk) = blind_rsa::generate_test_keypair();
+        let pk_b64 = BASE64_STANDARD.encode(pk.to_der().expect("pk to der"));
+        let election = Election {
+            rsa_pub_key: pk_b64,
+            ..plurality_election(id, "RSA Election", status)
+        };
+        (election, sk)
+    }
+
+    /// A syntactically valid stored voting token (all base64 fields decode).
+    fn stored_token(consumed: bool) -> token::VotingToken {
+        token::VotingToken {
+            nonce_b64: BASE64_STANDARD.encode([7u8; 32]),
+            h_n: hex::encode([9u8; 32]),
+            signature_b64: BASE64_STANDARD.encode([1u8; 16]),
+            randomizer_b64: None,
+            consumed,
+        }
     }
 
     fn set_pending(app: &mut App, kind: PendingKind) -> u64 {
@@ -837,7 +953,7 @@ mod tests {
     /// arrives, permanently burning the voter's token slot.
     #[test]
     fn mismatched_ok_response_does_not_consume_pending() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::RequestToken);
 
         app.handle_ec_response(&EcResponse::Ok {
@@ -855,7 +971,7 @@ mod tests {
     /// matching alone cannot tell two requests of the same kind apart.
     #[test]
     fn ok_with_stale_request_id_does_not_consume_pending() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::Register);
 
         app.handle_ec_response(&EcResponse::Ok {
@@ -872,7 +988,7 @@ mod tests {
     /// pending state.
     #[test]
     fn ok_with_matching_request_id_consumes_pending() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::Register);
 
         app.handle_ec_response(&EcResponse::Ok {
@@ -892,7 +1008,7 @@ mod tests {
     /// ids the request fails via the send timeout instead.
     #[test]
     fn error_without_request_id_does_not_clear_pending() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::Register);
 
         app.handle_ec_response(&EcResponse::Error {
@@ -911,7 +1027,7 @@ mod tests {
     /// state — action matching alone cannot tell two requests apart.
     #[test]
     fn ok_without_request_id_does_not_consume_pending() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::Register);
 
         app.handle_ec_response(&EcResponse::Ok {
@@ -929,7 +1045,7 @@ mod tests {
     /// drop the blinding secret needed for the real blind signature.
     #[test]
     fn error_with_stale_request_id_leaves_pending_untouched() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::RequestToken);
 
         app.handle_ec_response(&EcResponse::Error {
@@ -949,7 +1065,7 @@ mod tests {
     /// An error echoing the in-flight request_id fails that request.
     #[test]
     fn error_with_matching_request_id_clears_pending() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::Register);
 
         app.handle_ec_response(&EcResponse::Error {
@@ -966,7 +1082,7 @@ mod tests {
     /// A timeout for a previous request must not cancel a newer one.
     #[test]
     fn stale_timeout_is_ignored_matching_timeout_clears() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::CastVote);
 
         app.handle_nostr(NostrAction::RequestTimeout(41));
@@ -1065,7 +1181,7 @@ mod tests {
     /// Same for failures reported by the Nostr task.
     #[test]
     fn stale_failure_is_ignored_matching_failure_clears() {
-        let mut app = test_app();
+        let (mut app, _rx, _dir) = isolated_app();
         set_pending(&mut app, PendingKind::RequestToken);
 
         app.handle_nostr(NostrAction::RequestFailed(7, "boom".to_string()));
@@ -1074,5 +1190,1599 @@ mod tests {
         app.handle_nostr(NostrAction::RequestFailed(42, "boom".to_string()));
         assert!(app.pending.is_none());
         assert!(app.error_message.is_some());
+    }
+
+    // --- update() dispatch ---------------------------------------------------
+
+    #[test]
+    fn quit_action_returns_should_quit_yes() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+
+        // Act
+        let result = app.update(Action::Quit);
+
+        // Assert
+        assert_eq!(result, ShouldQuit::Yes);
+    }
+
+    #[test]
+    fn key_press_clears_transient_error_message() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.screen = Screen::ElectionList;
+        app.error_message = Some("stale error".to_string());
+
+        // Act
+        let result = app.update(Action::KeyPress(KeyCode::Char('x')));
+
+        // Assert
+        assert_eq!(result, ShouldQuit::No);
+        assert!(app.error_message.is_none());
+    }
+
+    #[test]
+    fn resize_action_is_a_no_op() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.status_message = Some("hello".to_string());
+
+        // Act
+        let result = app.update(Action::Resize);
+
+        // Assert
+        assert_eq!(result, ShouldQuit::No);
+        assert_eq!(app.screen, Screen::Welcome);
+        assert_eq!(app.status_message.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn identity_created_sets_status_and_moves_to_election_list() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        let pubkey = "ab".repeat(32);
+
+        // Act
+        app.update(Action::IdentityCreated(pubkey.clone()));
+
+        // Assert
+        assert_eq!(app.screen, Screen::ElectionList);
+        let status = app.status_message.expect("status message set");
+        assert!(status.contains(&pubkey[..16]));
+    }
+
+    #[test]
+    fn identity_unlocked_moves_to_election_list() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+
+        // Act
+        app.update(Action::IdentityUnlocked);
+
+        // Assert
+        assert_eq!(app.screen, Screen::ElectionList);
+    }
+
+    // --- Global keys -----------------------------------------------------------
+
+    #[test]
+    fn question_mark_toggles_help_on_and_off() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.screen = Screen::ElectionList;
+
+        // Act + Assert
+        press(&mut app, KeyCode::Char('?'));
+        assert!(app.show_help);
+        press(&mut app, KeyCode::Char('?'));
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn q_emits_quit_action_outside_input_mode() {
+        // Arrange
+        let (mut app, mut rx, _dir) = isolated_app();
+        app.screen = Screen::ElectionList;
+
+        // Act
+        press(&mut app, KeyCode::Char('q'));
+
+        // Assert
+        assert!(matches!(rx.try_recv(), Ok(Action::Quit)));
+    }
+
+    #[test]
+    fn q_and_question_mark_are_typed_into_password_input_in_input_mode() {
+        // Arrange
+        let (mut app, mut rx, _dir) = isolated_app();
+        app.screen = Screen::PasswordPrompt;
+
+        // Act
+        press(&mut app, KeyCode::Char('q'));
+        press(&mut app, KeyCode::Char('?'));
+
+        // Assert
+        assert_eq!(app.password_input, "q?");
+        assert!(!app.show_help);
+        assert!(rx.try_recv().is_err(), "no Quit action must be emitted");
+    }
+
+    #[test]
+    fn esc_closes_help_and_other_keys_are_ignored_while_help_open() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.screen = Screen::ElectionList;
+        app.elections.insert(
+            "e1".to_string(),
+            plurality_election("e1", "General", ElectionStatus::Open),
+        );
+        app.show_help = true;
+
+        // Act: navigation and Enter must be swallowed while help is open
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        assert_eq!(app.election_list_index, 0);
+        assert_eq!(app.screen, Screen::ElectionList);
+
+        // Act: Esc closes help
+        press(&mut app, KeyCode::Esc);
+
+        // Assert
+        assert!(!app.show_help);
+    }
+
+    // --- Welcome screen --------------------------------------------------------
+
+    #[test]
+    fn welcome_g_generates_identity_in_tempdir_and_emits_identity_created() {
+        // Arrange
+        let (mut app, mut rx, _dir) = isolated_app();
+
+        // Act
+        press(&mut app, KeyCode::Char('g'));
+
+        // Assert
+        let keys = app.keys.as_ref().expect("keys generated");
+        assert!(
+            app.config.identity.path.exists(),
+            "identity file must be written inside the tempdir"
+        );
+        match rx.try_recv() {
+            Ok(Action::IdentityCreated(pubkey)) => {
+                assert_eq!(pubkey, keys.public_key().to_hex());
+            }
+            other => panic!("expected IdentityCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn welcome_i_and_unknown_keys_are_no_ops() {
+        // Arrange
+        let (mut app, mut rx, _dir) = isolated_app();
+
+        // Act
+        press(&mut app, KeyCode::Char('i'));
+        press(&mut app, KeyCode::Char('x'));
+
+        // Assert
+        assert!(app.keys.is_none());
+        assert_eq!(app.screen, Screen::Welcome);
+        assert!(rx.try_recv().is_err());
+    }
+
+    // --- Password prompt ---------------------------------------------------------
+
+    #[test]
+    fn password_prompt_accumulates_chars_and_backspace_pops() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.screen = Screen::PasswordPrompt;
+
+        // Act
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('b'));
+        press(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Left); // ignored key
+
+        // Assert
+        assert_eq!(app.password_input, "ab");
+    }
+
+    #[test]
+    fn password_prompt_wrong_password_sets_error_and_clears_input() {
+        // Arrange: a real age-encrypted identity inside the tempdir
+        let (mut app, _rx, _dir) = isolated_app();
+        let keys = voter::identity::generate_keypair();
+        voter::identity::save_identity(&keys, Some("correct-horse"), &app.config.identity.path)
+            .expect("save encrypted identity");
+        app.screen = Screen::PasswordPrompt;
+        app.password_input = "wrong".to_string();
+
+        // Act
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        let error = app.error_message.expect("unlock error set");
+        assert!(error.contains("Unlock failed"));
+        assert!(app.password_input.is_empty());
+        assert!(app.keys.is_none());
+    }
+
+    #[test]
+    fn password_prompt_correct_password_unlocks_and_emits_identity_unlocked() {
+        // Arrange
+        let (mut app, mut rx, _dir) = isolated_app();
+        let keys = voter::identity::generate_keypair();
+        voter::identity::save_identity(&keys, Some("correct-horse"), &app.config.identity.path)
+            .expect("save encrypted identity");
+        app.screen = Screen::PasswordPrompt;
+        app.password_input = "correct-horse".to_string();
+
+        // Act
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        let unlocked = app.keys.as_ref().expect("keys unlocked");
+        assert_eq!(unlocked.public_key(), keys.public_key());
+        assert!(app.password_input.is_empty());
+        assert!(matches!(rx.try_recv(), Ok(Action::IdentityUnlocked)));
+    }
+
+    // --- Election list -----------------------------------------------------------
+
+    #[test]
+    fn election_list_navigation_clamps_on_empty_and_non_empty_lists() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.screen = Screen::ElectionList;
+
+        // Act + Assert: empty list — both directions stay at 0
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.election_list_index, 0);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.election_list_index, 0);
+
+        // Arrange: two elections
+        app.elections.insert(
+            "e1".to_string(),
+            plurality_election("e1", "Alpha", ElectionStatus::Open),
+        );
+        app.elections.insert(
+            "e2".to_string(),
+            plurality_election("e2", "Beta", ElectionStatus::Open),
+        );
+
+        // Act + Assert: down clamps at last index, up clamps at 0
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.election_list_index, 1);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.election_list_index, 1, "down must clamp at the end");
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.election_list_index, 0);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.election_list_index, 0, "up must clamp at 0");
+    }
+
+    #[test]
+    fn election_list_enter_with_no_elections_is_a_no_op() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.screen = Screen::ElectionList;
+
+        // Act
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        assert_eq!(app.screen, Screen::ElectionList);
+    }
+
+    #[test]
+    fn election_list_enter_opens_detail_of_name_sorted_selection() {
+        // Arrange: insertion order differs from name order
+        let (mut app, _rx, _dir) = isolated_app();
+        app.screen = Screen::ElectionList;
+        app.elections.insert(
+            "id-z".to_string(),
+            plurality_election("id-z", "Alpha", ElectionStatus::Open),
+        );
+        app.elections.insert(
+            "id-a".to_string(),
+            plurality_election("id-a", "Zeta", ElectionStatus::Open),
+        );
+        app.election_list_index = 1;
+
+        // Act
+        press(&mut app, KeyCode::Enter);
+
+        // Assert: index 1 in name order (Alpha, Zeta) is "Zeta" = id-a
+        assert_eq!(
+            app.screen,
+            Screen::ElectionDetail {
+                election_id: "id-a".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn election_list_s_opens_settings_and_remembers_previous_screen() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.screen = Screen::ElectionList;
+
+        // Act
+        press(&mut app, KeyCode::Char('s'));
+
+        // Assert
+        assert_eq!(app.screen, Screen::Settings);
+        assert_eq!(app.previous_screen, Some(Screen::ElectionList));
+    }
+
+    #[test]
+    fn sorted_election_ids_are_sorted_by_name() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.elections.insert(
+            "id-c".to_string(),
+            plurality_election("id-c", "Zebra", ElectionStatus::Open),
+        );
+        app.elections.insert(
+            "id-a".to_string(),
+            plurality_election("id-a", "Mango", ElectionStatus::Open),
+        );
+        app.elections.insert(
+            "id-b".to_string(),
+            plurality_election("id-b", "Apple", ElectionStatus::Open),
+        );
+
+        // Act
+        let ids = app.sorted_election_ids();
+
+        // Assert
+        assert_eq!(ids, vec!["id-b", "id-a", "id-c"]);
+    }
+
+    // --- Election detail -----------------------------------------------------------
+
+    #[test]
+    fn detail_esc_returns_to_list_and_clears_token_input() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.elections.insert(
+            "e1".to_string(),
+            plurality_election("e1", "General", ElectionStatus::Open),
+        );
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+        app.token_input = "half-typed".to_string();
+
+        // Act
+        press(&mut app, KeyCode::Esc);
+
+        // Assert
+        assert_eq!(app.screen, Screen::ElectionList);
+        assert!(app.token_input.is_empty());
+    }
+
+    #[test]
+    fn detail_enter_starts_token_editing_only_when_open_and_unregistered() {
+        // Arrange: open election, not registered
+        let (mut app, _rx, _dir) = isolated_app();
+        app.elections.insert(
+            "e1".to_string(),
+            plurality_election("e1", "General", ElectionStatus::Open),
+        );
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+
+        // Act
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        assert!(app.editing_token, "open + unregistered must start editing");
+
+        // Arrange: registered voter must not re-enter editing
+        app.editing_token = false;
+        app.persistent_state.mark_registered("e1".to_string());
+
+        // Act
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        assert!(!app.editing_token, "registered voter must not edit a token");
+    }
+
+    #[test]
+    fn token_editing_accepts_chars_backspace_and_esc_cancels() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.elections.insert(
+            "e1".to_string(),
+            plurality_election("e1", "General", ElectionStatus::Open),
+        );
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+        app.editing_token = true;
+
+        // Act: type, then correct a typo
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('b'));
+        press(&mut app, KeyCode::Backspace);
+
+        // Assert
+        assert_eq!(app.token_input, "a");
+
+        // Act: Esc cancels editing and clears the buffer
+        press(&mut app, KeyCode::Esc);
+
+        // Assert
+        assert!(!app.editing_token);
+        assert!(app.token_input.is_empty());
+        assert_eq!(
+            app.screen,
+            Screen::ElectionDetail {
+                election_id: "e1".to_string()
+            },
+            "Esc in editing mode must not leave the detail screen"
+        );
+    }
+
+    #[test]
+    fn submit_registration_sends_register_command_and_sets_pending() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.elections.insert(
+            "e1".to_string(),
+            plurality_election("e1", "General", ElectionStatus::Open),
+        );
+        let mut cmd_rx = attach_cmd_channel(&mut app);
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+        app.editing_token = true;
+        app.token_input = "  reg-token-123  ".to_string();
+
+        // Act
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        assert!(!app.editing_token);
+        assert!(app.token_input.is_empty());
+        assert!(app.is_loading);
+        assert!(app.loading_step.is_some());
+        let pending = app.pending.as_ref().expect("pending register request");
+        assert_eq!(pending.kind, PendingKind::Register);
+        assert_eq!(pending.election_id, "e1");
+        match cmd_rx.try_recv().expect("command sent") {
+            VoterCommand::Send {
+                ec_pubkey,
+                msg:
+                    VoterMessage::Register {
+                        election_id,
+                        registration_token,
+                        request_id,
+                    },
+                ..
+            } => {
+                assert_eq!(ec_pubkey, "ec-pubkey-hex");
+                assert_eq!(election_id, "e1");
+                assert_eq!(registration_token, "reg-token-123", "token must be trimmed");
+                assert_eq!(request_id, pending.request_id);
+            }
+            other => panic!("expected Register Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_registration_without_cmd_tx_reports_not_connected() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.elections.insert(
+            "e1".to_string(),
+            plurality_election("e1", "General", ElectionStatus::Open),
+        );
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+        app.editing_token = true;
+        app.token_input = "reg-token".to_string();
+
+        // Act
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        assert_eq!(
+            app.error_message.as_deref(),
+            Some("Not connected to relays")
+        );
+        assert!(app.pending.is_none());
+        assert!(!app.is_loading);
+    }
+
+    #[test]
+    fn submit_registration_without_resolvable_ec_pubkey_reports_unknown_key() {
+        // Arrange: no pinned EC key and no announcement author
+        let (mut app, _rx, _dir) = isolated_app();
+        let election = Election {
+            ec_pubkey: None,
+            ..plurality_election("e1", "General", ElectionStatus::Open)
+        };
+        app.elections.insert("e1".to_string(), election);
+        let mut cmd_rx = attach_cmd_channel(&mut app);
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+        app.editing_token = true;
+        app.token_input = "reg-token".to_string();
+
+        // Act
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        assert_eq!(
+            app.error_message.as_deref(),
+            Some("EC public key unknown for this election")
+        );
+        assert!(app.pending.is_none());
+        assert!(cmd_rx.try_recv().is_err(), "no command may be sent");
+    }
+
+    #[test]
+    fn t_requests_token_when_registered_and_in_progress() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        let (election, _sk) = rsa_election("e1", ElectionStatus::InProgress);
+        app.elections.insert("e1".to_string(), election);
+        app.persistent_state.mark_registered("e1".to_string());
+        let mut cmd_rx = attach_cmd_channel(&mut app);
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+
+        // Act
+        press(&mut app, KeyCode::Char('t'));
+
+        // Assert
+        let pending = app.pending.as_ref().expect("pending token request");
+        assert_eq!(pending.kind, PendingKind::RequestToken);
+        assert!(app.pending_blind.is_some(), "blinding secret must be held");
+        assert!(app.is_loading);
+        match cmd_rx.try_recv().expect("command sent") {
+            VoterCommand::Send {
+                msg:
+                    VoterMessage::RequestToken {
+                        election_id,
+                        blinded_nonce,
+                        request_id,
+                    },
+                ..
+            } => {
+                assert_eq!(election_id, "e1");
+                assert!(!blinded_nonce.is_empty());
+                assert_eq!(request_id, pending.request_id);
+            }
+            other => panic!("expected RequestToken Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_is_blocked_when_unregistered_wrong_status_token_held_or_voted() {
+        let cases: [(&str, ElectionStatus, bool, Option<bool>); 4] = [
+            // (case, status, registered, token consumed if stored)
+            ("unregistered", ElectionStatus::InProgress, false, None),
+            ("wrong status", ElectionStatus::Open, true, None),
+            ("token held", ElectionStatus::InProgress, true, Some(false)),
+            (
+                "already voted",
+                ElectionStatus::InProgress,
+                true,
+                Some(true),
+            ),
+        ];
+
+        for (case, status, registered, token_consumed) in cases {
+            // Arrange
+            let (mut app, _rx, _dir) = isolated_app();
+            app.elections.insert(
+                "e1".to_string(),
+                plurality_election("e1", "General", status),
+            );
+            if registered {
+                app.persistent_state.mark_registered("e1".to_string());
+            }
+            if let Some(consumed) = token_consumed {
+                app.persistent_state
+                    .store_token("e1".to_string(), stored_token(consumed));
+            }
+            let mut cmd_rx = attach_cmd_channel(&mut app);
+            app.screen = Screen::ElectionDetail {
+                election_id: "e1".to_string(),
+            };
+
+            // Act
+            press(&mut app, KeyCode::Char('t'));
+
+            // Assert
+            assert!(app.pending.is_none(), "case '{case}': must not send");
+            assert!(app.pending_blind.is_none(), "case '{case}'");
+            assert!(app.error_message.is_none(), "case '{case}'");
+            assert!(cmd_rx.try_recv().is_err(), "case '{case}': no command");
+        }
+    }
+
+    #[test]
+    fn r_opens_results_only_when_results_exist() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.elections.insert(
+            "e1".to_string(),
+            plurality_election("e1", "General", ElectionStatus::Finished),
+        );
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+
+        // Act: no results yet
+        press(&mut app, KeyCode::Char('r'));
+
+        // Assert
+        assert_eq!(
+            app.screen,
+            Screen::ElectionDetail {
+                election_id: "e1".to_string()
+            }
+        );
+
+        // Arrange: results arrive
+        app.results.insert(
+            "e1".to_string(),
+            ElectionResults {
+                election_id: "e1".to_string(),
+                elected: vec![1],
+                tally: vec![],
+            },
+        );
+
+        // Act
+        press(&mut app, KeyCode::Char('r'));
+
+        // Assert
+        assert_eq!(
+            app.screen,
+            Screen::Results {
+                election_id: "e1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn v_opens_vote_screen_only_with_active_token() {
+        // Arrange: in-progress election but no token
+        let (mut app, _rx, _dir) = isolated_app();
+        app.elections.insert(
+            "e1".to_string(),
+            plurality_election("e1", "General", ElectionStatus::InProgress),
+        );
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+
+        // Act
+        press(&mut app, KeyCode::Char('v'));
+
+        // Assert
+        assert_eq!(
+            app.screen,
+            Screen::ElectionDetail {
+                election_id: "e1".to_string()
+            },
+            "without a token 'v' must be a no-op"
+        );
+
+        // Arrange: active token, plus stale selection state to be reset
+        app.persistent_state
+            .store_token("e1".to_string(), stored_token(false));
+        app.candidate_list_index = 1;
+        app.stv_ranking = vec![2];
+        app.vote_confirm = Some(true);
+
+        // Act
+        press(&mut app, KeyCode::Char('v'));
+
+        // Assert
+        assert_eq!(
+            app.screen,
+            Screen::Vote {
+                election_id: "e1".to_string()
+            }
+        );
+        assert_eq!(app.candidate_list_index, 0);
+        assert!(app.stv_ranking.is_empty());
+        assert!(app.vote_confirm.is_none());
+    }
+
+    // --- Vote screen ---------------------------------------------------------------
+
+    fn vote_screen_app(election: Election) -> (App, mpsc::UnboundedReceiver<Action>, TempDir) {
+        let (mut app, rx, dir) = isolated_app();
+        let eid = election.election_id.clone();
+        app.elections.insert(eid.clone(), election);
+        app.screen = Screen::Vote { election_id: eid };
+        (app, rx, dir)
+    }
+
+    #[test]
+    fn plurality_enter_replaces_selection_with_single_candidate() {
+        // Arrange
+        let (mut app, _rx, _dir) = vote_screen_app(plurality_election(
+            "e1",
+            "General",
+            ElectionStatus::InProgress,
+        ));
+
+        // Act: select the first candidate, then move and select the second
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.stv_ranking, vec![1]);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char(' '));
+
+        // Assert: plurality keeps exactly one selection
+        assert_eq!(app.stv_ranking, vec![2]);
+    }
+
+    #[test]
+    fn stv_enter_appends_unique_and_d_removes() {
+        // Arrange
+        let (mut app, _rx, _dir) = vote_screen_app(stv_election("e1", "Council"));
+
+        // Act: rank candidate 1 twice (dup must be ignored), then candidate 2
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        assert_eq!(app.stv_ranking, vec![1, 2], "no duplicate ranks");
+
+        // Act: 'd' removes the highlighted candidate (still index 1 = Bob)
+        press(&mut app, KeyCode::Char('d'));
+
+        // Assert
+        assert_eq!(app.stv_ranking, vec![1]);
+
+        // Act: 'd' on an unranked candidate changes nothing
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.stv_ranking, vec![1]);
+    }
+
+    #[test]
+    fn vote_navigation_clamps_at_both_ends() {
+        // Arrange: two candidates
+        let (mut app, _rx, _dir) = vote_screen_app(plurality_election(
+            "e1",
+            "General",
+            ElectionStatus::InProgress,
+        ));
+
+        // Act + Assert
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.candidate_list_index, 1, "down clamps at last candidate");
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.candidate_list_index, 0, "up clamps at 0");
+    }
+
+    #[test]
+    fn s_opens_confirm_dialog_only_with_a_ranking() {
+        // Arrange
+        let (mut app, _rx, _dir) = vote_screen_app(plurality_election(
+            "e1",
+            "General",
+            ElectionStatus::InProgress,
+        ));
+
+        // Act: empty ranking
+        press(&mut app, KeyCode::Char('s'));
+
+        // Assert
+        assert!(app.vote_confirm.is_none());
+
+        // Act: with a ranking
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('s'));
+
+        // Assert: dialog opens with the cancel button focused
+        assert_eq!(app.vote_confirm, Some(false));
+    }
+
+    #[test]
+    fn confirm_dialog_toggles_and_closes_without_submitting() {
+        // Arrange
+        let (mut app, _rx, _dir) = vote_screen_app(plurality_election(
+            "e1",
+            "General",
+            ElectionStatus::InProgress,
+        ));
+        let mut cmd_rx = attach_cmd_channel(&mut app);
+        app.stv_ranking = vec![1];
+        app.vote_confirm = Some(false);
+
+        // Act + Assert: Tab/Left/Right all toggle focus
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.vote_confirm, Some(true));
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.vote_confirm, Some(false));
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.vote_confirm, Some(true));
+
+        // Act: Esc closes the dialog
+        press(&mut app, KeyCode::Esc);
+        assert!(app.vote_confirm.is_none());
+        assert_eq!(
+            app.screen,
+            Screen::Vote {
+                election_id: "e1".to_string()
+            },
+            "Esc closes the dialog, not the vote screen"
+        );
+
+        // Act: Enter on the unfocused (cancel) button closes without submit
+        app.vote_confirm = Some(false);
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        assert!(app.vote_confirm.is_none());
+        assert!(app.pending.is_none());
+        assert!(cmd_rx.try_recv().is_err(), "no vote may be submitted");
+    }
+
+    #[test]
+    fn confirm_dialog_focused_enter_submits_anonymous_cast_vote() {
+        // Arrange
+        let (mut app, _rx, _dir) = vote_screen_app(plurality_election(
+            "e1",
+            "General",
+            ElectionStatus::InProgress,
+        ));
+        let token = stored_token(false);
+        let expected_h_n = token.h_n.clone();
+        app.persistent_state.store_token("e1".to_string(), token);
+        let mut cmd_rx = attach_cmd_channel(&mut app);
+        app.stv_ranking = vec![2];
+        app.vote_confirm = Some(true);
+
+        // Act
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        assert!(app.vote_confirm.is_none());
+        let pending = app.pending.as_ref().expect("pending cast vote");
+        assert_eq!(pending.kind, PendingKind::CastVote);
+        match cmd_rx.try_recv().expect("command sent") {
+            VoterCommand::SendAnonymous {
+                msg:
+                    VoterMessage::CastVote {
+                        election_id,
+                        candidate_ids,
+                        h_n,
+                        token: wire_token,
+                        request_id,
+                    },
+                ..
+            } => {
+                assert_eq!(election_id, "e1");
+                assert_eq!(candidate_ids, vec![2]);
+                assert_eq!(h_n, expected_h_n);
+                assert!(!wire_token.is_empty());
+                assert_eq!(request_id, pending.request_id);
+            }
+            other => panic!("expected SendAnonymous CastVote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_vote_without_token_sets_error() {
+        // Arrange: no stored token
+        let (mut app, _rx, _dir) = vote_screen_app(plurality_election(
+            "e1",
+            "General",
+            ElectionStatus::InProgress,
+        ));
+        let mut cmd_rx = attach_cmd_channel(&mut app);
+        app.stv_ranking = vec![1];
+        app.vote_confirm = Some(true);
+
+        // Act
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        assert_eq!(
+            app.error_message.as_deref(),
+            Some("No voting token for this election")
+        );
+        assert!(app.pending.is_none());
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn submit_vote_with_corrupt_stored_token_sets_error() {
+        // Arrange: stored signature is not valid base64
+        let (mut app, _rx, _dir) = vote_screen_app(plurality_election(
+            "e1",
+            "General",
+            ElectionStatus::InProgress,
+        ));
+        let corrupt = token::VotingToken {
+            signature_b64: "%%%not-base64%%%".to_string(),
+            ..stored_token(false)
+        };
+        app.persistent_state.store_token("e1".to_string(), corrupt);
+        let mut cmd_rx = attach_cmd_channel(&mut app);
+        app.stv_ranking = vec![1];
+        app.vote_confirm = Some(true);
+
+        // Act
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        let error = app.error_message.expect("corrupt token error");
+        assert!(error.starts_with("Stored token is corrupt"));
+        assert!(app.pending.is_none());
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn vote_esc_returns_to_election_detail() {
+        // Arrange
+        let (mut app, _rx, _dir) = vote_screen_app(plurality_election(
+            "e1",
+            "General",
+            ElectionStatus::InProgress,
+        ));
+
+        // Act
+        press(&mut app, KeyCode::Esc);
+
+        // Assert
+        assert_eq!(
+            app.screen,
+            Screen::ElectionDetail {
+                election_id: "e1".to_string()
+            }
+        );
+    }
+
+    // --- Results & Settings ----------------------------------------------------------
+
+    #[test]
+    fn results_esc_returns_to_election_detail() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.screen = Screen::Results {
+            election_id: "e1".to_string(),
+        };
+
+        // Act
+        press(&mut app, KeyCode::Esc);
+
+        // Assert
+        assert_eq!(
+            app.screen,
+            Screen::ElectionDetail {
+                election_id: "e1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn settings_esc_returns_to_previous_screen_or_election_list() {
+        // Arrange: with a remembered previous screen
+        let (mut app, _rx, _dir) = isolated_app();
+        app.screen = Screen::Settings;
+        app.previous_screen = Some(Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        });
+
+        // Act
+        press(&mut app, KeyCode::Esc);
+
+        // Assert
+        assert_eq!(
+            app.screen,
+            Screen::ElectionDetail {
+                election_id: "e1".to_string()
+            }
+        );
+        assert!(app.previous_screen.is_none());
+
+        // Arrange: without a previous screen
+        app.screen = Screen::Settings;
+
+        // Act
+        press(&mut app, KeyCode::Esc);
+
+        // Assert
+        assert_eq!(app.screen, Screen::ElectionList);
+    }
+
+    // --- handle_nostr ------------------------------------------------------------------
+
+    #[test]
+    fn election_update_inserts_and_replaces_by_id() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+
+        // Act
+        app.update(Action::Nostr(NostrAction::ElectionUpdate(
+            plurality_election("e1", "First", ElectionStatus::Open),
+        )));
+        app.update(Action::Nostr(NostrAction::ElectionUpdate(
+            plurality_election("e1", "Renamed", ElectionStatus::InProgress),
+        )));
+
+        // Assert
+        assert_eq!(app.elections.len(), 1);
+        let election = app.elections.get("e1").expect("election stored");
+        assert_eq!(election.name, "Renamed");
+        assert_eq!(election.status, ElectionStatus::InProgress);
+    }
+
+    #[test]
+    fn election_result_is_inserted() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+
+        // Act
+        app.update(Action::Nostr(NostrAction::ElectionResult(
+            ElectionResults {
+                election_id: "e1".to_string(),
+                elected: vec![2],
+                tally: vec![],
+            },
+        )));
+
+        // Assert
+        let results = app.results.get("e1").expect("results stored");
+        assert_eq!(results.elected, vec![2]);
+    }
+
+    #[test]
+    fn connection_status_updates_connected_flag_and_messages() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.error_message = Some("old error".to_string());
+
+        // Act: connected
+        app.update(Action::Nostr(NostrAction::ConnectionStatus(true)));
+
+        // Assert
+        assert!(app.connected);
+        assert_eq!(app.status_message.as_deref(), Some("Connected to relays"));
+        assert!(app.error_message.is_none());
+
+        // Act: disconnected
+        app.update(Action::Nostr(NostrAction::ConnectionStatus(false)));
+
+        // Assert
+        assert!(!app.connected);
+        assert!(app.status_message.is_none());
+        assert_eq!(
+            app.error_message.as_deref(),
+            Some("Disconnected from relays")
+        );
+    }
+
+    #[test]
+    fn nostr_error_sets_error_message() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+
+        // Act
+        app.update(Action::Nostr(NostrAction::Error(
+            "relay exploded".to_string(),
+        )));
+
+        // Assert
+        assert_eq!(app.error_message.as_deref(), Some("relay exploded"));
+    }
+
+    // --- handle_ec_response happy paths --------------------------------------------------
+
+    #[test]
+    fn register_confirmed_persists_registration_to_tempdir_state_file() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        set_pending(&mut app, PendingKind::Register);
+
+        // Act
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "register-confirmed".to_string(),
+            blind_signature: None,
+            request_id: Some("req-42".to_string()),
+        });
+
+        // Assert
+        assert!(app.persistent_state.is_registered("e1"));
+        assert_eq!(app.status_message.as_deref(), Some("Registered ✓"));
+        assert!(app.pending.is_none());
+        assert!(!app.is_loading);
+        assert!(
+            app.state_path.exists(),
+            "state must be saved to the tempdir"
+        );
+        let reloaded = AppState::load(&app.state_path).expect("reload persisted state");
+        assert!(reloaded.is_registered("e1"));
+    }
+
+    #[test]
+    fn token_issued_with_valid_blind_signature_stores_verified_token() {
+        // Arrange: a registered, in-progress election with a real RSA key
+        let (mut app, _rx, _dir) = isolated_app();
+        let (election, sk) = rsa_election("e1", ElectionStatus::InProgress);
+        app.elections.insert("e1".to_string(), election);
+        app.persistent_state.mark_registered("e1".to_string());
+        let mut cmd_rx = attach_cmd_channel(&mut app);
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+        press(&mut app, KeyCode::Char('t'));
+        let (blinded_nonce, request_id) = match cmd_rx.try_recv().expect("token request sent") {
+            VoterCommand::Send {
+                msg:
+                    VoterMessage::RequestToken {
+                        blinded_nonce,
+                        request_id,
+                        ..
+                    },
+                ..
+            } => (blinded_nonce, request_id),
+            other => panic!("expected RequestToken Send, got {other:?}"),
+        };
+
+        // Act: play the EC — blind-sign the blinded nonce and echo the id
+        let blinded = BASE64_STANDARD.decode(&blinded_nonce).expect("valid b64");
+        let blind_sig = sk.blind_sign(&blinded).expect("EC blind sign");
+        let blind_sig_b64 = BASE64_STANDARD.encode(&blind_sig.0);
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "token-issued".to_string(),
+            blind_signature: Some(blind_sig_b64),
+            request_id: Some(request_id),
+        });
+
+        // Assert
+        assert!(app.pending.is_none());
+        assert!(app.pending_blind.is_none());
+        assert!(!app.is_loading);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Voting token received and verified ✓")
+        );
+        let stored = app
+            .persistent_state
+            .get_active_token("e1")
+            .expect("verified token stored");
+        assert!(!stored.h_n.is_empty());
+        let reloaded = AppState::load(&app.state_path).expect("reload persisted state");
+        assert!(reloaded.get_active_token("e1").is_some());
+    }
+
+    #[test]
+    fn token_issued_without_blind_signature_reports_missing_signature() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        set_pending(&mut app, PendingKind::RequestToken);
+
+        // Act
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "token-issued".to_string(),
+            blind_signature: None,
+            request_id: Some("req-42".to_string()),
+        });
+
+        // Assert
+        assert!(app.pending.is_none());
+        assert!(!app.is_loading);
+        let error = app.error_message.expect("missing signature error");
+        assert!(error.contains("missing blind signature"));
+        assert!(app.persistent_state.get_active_token("e1").is_none());
+    }
+
+    #[test]
+    fn token_issued_with_garbage_signature_fails_verification() {
+        // Arrange: real request in flight so a genuine blinding secret exists
+        let (mut app, _rx, _dir) = isolated_app();
+        let (election, _sk) = rsa_election("e1", ElectionStatus::InProgress);
+        app.elections.insert("e1".to_string(), election);
+        app.persistent_state.mark_registered("e1".to_string());
+        let mut cmd_rx = attach_cmd_channel(&mut app);
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+        press(&mut app, KeyCode::Char('t'));
+        let request_id = match cmd_rx.try_recv().expect("token request sent") {
+            VoterCommand::Send {
+                msg: VoterMessage::RequestToken { request_id, .. },
+                ..
+            } => request_id,
+            other => panic!("expected RequestToken Send, got {other:?}"),
+        };
+
+        // Act: a garbage blind signature must never become a stored token
+        let garbage = BASE64_STANDARD.encode([0u8; 256]);
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "token-issued".to_string(),
+            blind_signature: Some(garbage),
+            request_id: Some(request_id),
+        });
+
+        // Assert
+        let error = app.error_message.expect("verification error");
+        assert!(error.contains("Token verification failed"));
+        assert!(app.persistent_state.get_active_token("e1").is_none());
+        assert!(app.pending.is_none());
+        assert!(app.pending_blind.is_none());
+    }
+
+    #[test]
+    fn vote_recorded_consumes_token_and_returns_to_detail() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.persistent_state
+            .store_token("e1".to_string(), stored_token(false));
+        app.stv_ranking = vec![1];
+        app.screen = Screen::Vote {
+            election_id: "e1".to_string(),
+        };
+        set_pending(&mut app, PendingKind::CastVote);
+
+        // Act
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "vote-recorded".to_string(),
+            blind_signature: None,
+            request_id: Some("req-42".to_string()),
+        });
+
+        // Assert
+        assert!(app.persistent_state.has_voted("e1"));
+        assert!(app.stv_ranking.is_empty());
+        assert_eq!(
+            app.screen,
+            Screen::ElectionDetail {
+                election_id: "e1".to_string()
+            }
+        );
+        assert_eq!(app.status_message.as_deref(), Some("Vote recorded ✓"));
+        let reloaded = AppState::load(&app.state_path).expect("reload persisted state");
+        assert!(reloaded.has_voted("e1"));
+    }
+
+    #[test]
+    fn vote_recorded_without_stored_token_reports_state_error() {
+        // Arrange: no token was ever stored for this election
+        let (mut app, _rx, _dir) = isolated_app();
+        app.stv_ranking = vec![1];
+        app.screen = Screen::Vote {
+            election_id: "e1".to_string(),
+        };
+        set_pending(&mut app, PendingKind::CastVote);
+
+        // Act
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "vote-recorded".to_string(),
+            blind_signature: None,
+            request_id: Some("req-42".to_string()),
+        });
+
+        // Assert
+        let error = app.error_message.expect("state error surfaced");
+        assert!(error.contains("state error"));
+        assert!(app.stv_ranking.is_empty());
+        assert_eq!(
+            app.screen,
+            Screen::ElectionDetail {
+                election_id: "e1".to_string()
+            }
+        );
+    }
+
+    // --- EC response formatting ------------------------------------------------------------
+
+    #[test]
+    fn uncorrelated_responses_format_status_and_error_messages() {
+        // Arrange: nothing in flight
+        let (mut app, _rx, _dir) = isolated_app();
+
+        // Act + Assert: Ok with a signature
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "token-issued".to_string(),
+            blind_signature: Some("sig".to_string()),
+            request_id: None,
+        });
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("EC: token-issued (signature received)")
+        );
+
+        // Act + Assert: Ok without a signature
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "vote-recorded".to_string(),
+            blind_signature: None,
+            request_id: None,
+        });
+        assert_eq!(app.status_message.as_deref(), Some("EC: vote-recorded"));
+
+        // Act + Assert: Error with nothing pending goes to error_message
+        app.handle_ec_response(&EcResponse::Error {
+            code: voter::nostr::messages::EcErrorCode::InternalError,
+            message: "boom".to_string(),
+            request_id: None,
+        });
+        let error = app.error_message.expect("EC error surfaced");
+        assert!(error.starts_with("EC error:"));
+        assert!(error.contains("boom"));
+    }
+
+    // --- Remaining edge paths ----------------------------------------------------------
+
+    #[test]
+    fn ec_response_is_routed_through_nostr_action_dispatch() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+
+        // Act: an uncorrelated Ok arriving via the normal Nostr action path
+        app.update(Action::Nostr(NostrAction::EcResponse(EcResponse::Ok {
+            action: "register-confirmed".to_string(),
+            blind_signature: None,
+            request_id: None,
+        })));
+
+        // Assert
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("EC: register-confirmed")
+        );
+    }
+
+    #[test]
+    fn welcome_g_reports_error_when_identity_path_is_not_writable() {
+        // Arrange: the identity path's parent is a regular file, so directory
+        // creation fails — still entirely inside the tempdir.
+        let (mut app, mut rx, dir) = isolated_app();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("create blocker file");
+        app.config.identity.path = blocker.join("identity.json");
+
+        // Act
+        press(&mut app, KeyCode::Char('g'));
+
+        // Assert
+        let error = app.error_message.expect("save error surfaced");
+        assert!(error.contains("Failed to save identity"));
+        assert!(app.keys.is_none());
+        assert!(rx.try_recv().is_err(), "no IdentityCreated may be emitted");
+    }
+
+    #[test]
+    fn token_editing_ignores_unrelated_keys() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        app.elections.insert(
+            "e1".to_string(),
+            plurality_election("e1", "General", ElectionStatus::Open),
+        );
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+        app.editing_token = true;
+        app.token_input = "abc".to_string();
+
+        // Act
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::F(1));
+
+        // Assert
+        assert!(app.editing_token);
+        assert_eq!(app.token_input, "abc");
+    }
+
+    #[test]
+    fn detail_and_vote_screens_ignore_unknown_keys() {
+        // Arrange: detail screen
+        let (mut app, _rx, _dir) = isolated_app();
+        app.elections.insert(
+            "e1".to_string(),
+            plurality_election("e1", "General", ElectionStatus::InProgress),
+        );
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+
+        // Act + Assert
+        press(&mut app, KeyCode::Char('z'));
+        assert_eq!(
+            app.screen,
+            Screen::ElectionDetail {
+                election_id: "e1".to_string()
+            }
+        );
+
+        // Arrange: vote screen
+        app.screen = Screen::Vote {
+            election_id: "e1".to_string(),
+        };
+
+        // Act + Assert
+        press(&mut app, KeyCode::Char('x'));
+        assert!(app.stv_ranking.is_empty());
+        assert_eq!(
+            app.screen,
+            Screen::Vote {
+                election_id: "e1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn confirm_dialog_ignores_unknown_keys() {
+        // Arrange
+        let (mut app, _rx, _dir) = vote_screen_app(plurality_election(
+            "e1",
+            "General",
+            ElectionStatus::InProgress,
+        ));
+        app.stv_ranking = vec![1];
+        app.vote_confirm = Some(false);
+
+        // Act
+        press(&mut app, KeyCode::Char('x'));
+
+        // Assert
+        assert_eq!(app.vote_confirm, Some(false));
+    }
+
+    #[test]
+    fn vote_selection_with_out_of_range_index_is_a_no_op() {
+        // Arrange
+        let (mut app, _rx, _dir) = vote_screen_app(stv_election("e1", "Council"));
+        app.stv_ranking = vec![1];
+        app.candidate_list_index = 99;
+
+        // Act
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('d'));
+
+        // Assert
+        assert_eq!(app.stv_ranking, vec![1]);
+    }
+
+    #[test]
+    fn send_command_with_closed_channel_reports_connection_task_down() {
+        // Arrange: a cmd channel whose receiver has been dropped
+        let (mut app, _rx, _dir) = isolated_app();
+        app.elections.insert(
+            "e1".to_string(),
+            plurality_election("e1", "General", ElectionStatus::Open),
+        );
+        let cmd_rx = attach_cmd_channel(&mut app);
+        drop(cmd_rx);
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+        app.editing_token = true;
+        app.token_input = "reg-token".to_string();
+
+        // Act
+        press(&mut app, KeyCode::Enter);
+
+        // Assert
+        assert_eq!(
+            app.error_message.as_deref(),
+            Some("Connection task is not running")
+        );
+        assert!(app.pending.is_none());
+        assert!(!app.is_loading);
+    }
+
+    #[test]
+    fn screen_specific_handlers_ignore_keys_when_screen_mismatches() {
+        // Arrange: defensive guards for handlers invoked with a foreign screen
+        let (mut app, _rx, _dir) = isolated_app();
+        app.screen = Screen::ElectionList;
+
+        // Act
+        app.handle_election_detail_key(KeyCode::Enter);
+        app.handle_vote_key(KeyCode::Enter);
+        app.handle_results_key(KeyCode::Esc);
+
+        // Assert
+        assert_eq!(app.screen, Screen::ElectionList);
+        assert!(app.stv_ranking.is_empty());
+        assert!(!app.editing_token);
+    }
+
+    #[test]
+    fn request_voting_token_for_unknown_election_is_a_no_op() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+
+        // Act
+        app.request_voting_token("missing");
+
+        // Assert
+        assert!(app.pending.is_none());
+        assert!(app.pending_blind.is_none());
+        assert!(app.error_message.is_none());
+    }
+
+    #[test]
+    fn t_with_invalid_rsa_key_reports_prepare_failure() {
+        // Arrange: registered + in-progress, but rsa_pub_key is not a real key
+        let (mut app, _rx, _dir) = isolated_app();
+        app.elections.insert(
+            "e1".to_string(),
+            plurality_election("e1", "General", ElectionStatus::InProgress),
+        );
+        app.persistent_state.mark_registered("e1".to_string());
+        let mut cmd_rx = attach_cmd_channel(&mut app);
+        app.screen = Screen::ElectionDetail {
+            election_id: "e1".to_string(),
+        };
+
+        // Act
+        press(&mut app, KeyCode::Char('t'));
+
+        // Assert
+        let error = app.error_message.expect("prepare failure surfaced");
+        assert!(error.contains("Failed to prepare token request"));
+        assert!(app.pending.is_none());
+        assert!(app.pending_blind.is_none());
+        assert!(cmd_rx.try_recv().is_err(), "no command may be sent");
+    }
+
+    #[test]
+    fn token_issued_with_no_pending_blind_reports_missing_request() {
+        // Arrange: a correlated pending request but no blinding secret held
+        let (mut app, _rx, _dir) = isolated_app();
+        set_pending(&mut app, PendingKind::RequestToken);
+
+        // Act
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "token-issued".to_string(),
+            blind_signature: Some("sig".to_string()),
+            request_id: Some("req-42".to_string()),
+        });
+
+        // Assert
+        let error = app.error_message.expect("mismatch error surfaced");
+        assert!(error.contains("no pending request"));
+        assert!(app.persistent_state.get_active_token("e1").is_none());
+    }
+
+    #[test]
+    fn save_state_failure_sets_error_message() {
+        // Arrange: state path whose parent is a regular file inside the tempdir
+        let (mut app, _rx, dir) = isolated_app();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("create blocker file");
+        app.state_path = blocker.join("state.json");
+        set_pending(&mut app, PendingKind::Register);
+
+        // Act
+        app.handle_ec_response(&EcResponse::Ok {
+            action: "register-confirmed".to_string(),
+            blind_signature: None,
+            request_id: Some("req-42".to_string()),
+        });
+
+        // Assert: registration succeeded in memory but persistence failed loudly
+        assert!(app.persistent_state.is_registered("e1"));
+        let error = app.error_message.expect("save failure surfaced");
+        assert!(error.contains("Failed to save state"));
     }
 }

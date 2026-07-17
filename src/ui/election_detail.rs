@@ -153,3 +153,173 @@ pub fn render(app: &App, frame: &mut Frame, election_id: &str) {
     ]));
     frame.render_widget(hints, chunks[3]);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::render;
+    use crate::ui::test_support::{
+        registration, render_to_text, sample_election, test_app, voting_token,
+    };
+    use voter::nostr::events::{ElectionResults, ElectionStatus, TallyEntry};
+
+    fn app_with_election(status: ElectionStatus) -> crate::app::App {
+        let (mut app, _dir) = test_app();
+        app.elections.insert(
+            "e1".to_string(),
+            sample_election("e1", "Board Election", status, "plurality"),
+        );
+        app
+    }
+
+    #[test]
+    fn renders_not_found_message_for_unknown_election() {
+        // Arrange
+        let (app, _dir) = test_app();
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "missing"));
+
+        // Assert
+        assert!(text.contains("Election not found"));
+    }
+
+    #[test]
+    fn renders_header_candidates_and_register_action_when_open_and_unregistered() {
+        // Arrange
+        let app = app_with_election(ElectionStatus::Open);
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(text.contains("Board Election"));
+        assert!(text.contains("Status: Open"));
+        assert!(text.contains("Rules: plurality"));
+        assert!(text.contains("3 candidates"));
+        assert!(text.contains("UTC"));
+        assert!(text.contains("1. Alice"));
+        assert!(text.contains("2. Bob"));
+        assert!(text.contains("3. Carol"));
+        assert!(text.contains("[Enter]"));
+        assert!(text.contains("Enter registration token to register"));
+    }
+
+    #[test]
+    fn offers_token_request_when_registered_and_in_progress() {
+        // Arrange
+        let mut app = app_with_election(ElectionStatus::InProgress);
+        app.persistent_state
+            .registrations
+            .insert("e1".to_string(), registration());
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(text.contains("Status: In Progress"));
+        assert!(text.contains("[t]"));
+        assert!(text.contains("Request voting token"));
+    }
+
+    #[test]
+    fn offers_vote_and_results_actions_when_token_held_and_results_published() {
+        // Arrange
+        let mut app = app_with_election(ElectionStatus::InProgress);
+        app.persistent_state
+            .tokens
+            .insert("e1".to_string(), voting_token(false));
+        app.results.insert(
+            "e1".to_string(),
+            ElectionResults {
+                election_id: "e1".to_string(),
+                elected: vec![1],
+                tally: vec![TallyEntry {
+                    candidate_id: 1,
+                    votes: 1.0,
+                }],
+            },
+        );
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(text.contains("[v]"));
+        assert!(text.contains("Cast your vote"));
+        assert!(text.contains("[r]"));
+        assert!(text.contains("View results"));
+    }
+
+    #[test]
+    fn shows_voted_badge_after_token_is_consumed() {
+        // Arrange
+        let mut app = app_with_election(ElectionStatus::InProgress);
+        app.persistent_state
+            .tokens
+            .insert("e1".to_string(), voting_token(true));
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(text.contains("Voted"));
+        assert!(!text.contains("Cast your vote"));
+    }
+
+    #[test]
+    fn renders_token_input_line_while_editing_token() {
+        // Arrange
+        let mut app = app_with_election(ElectionStatus::Open);
+        app.editing_token = true;
+        app.token_input = "abc123".to_string();
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(text.contains("Registration token: abc123█"));
+        assert!(text.contains("submit"));
+        assert!(text.contains("cancel"));
+    }
+
+    #[test]
+    fn shows_loading_step_while_a_request_is_in_flight() {
+        // Arrange: Finished status leaves the actions box free for the step
+        let mut app = app_with_election(ElectionStatus::Finished);
+        app.is_loading = true;
+        app.loading_step = Some("Registering with EC…".to_string());
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(text.contains("Registering with EC…"));
+    }
+
+    #[test]
+    fn hides_loading_step_when_not_loading() {
+        // Arrange: stale step text without the loading flag must not render
+        let mut app = app_with_election(ElectionStatus::Finished);
+        app.is_loading = false;
+        app.loading_step = Some("Registering with EC…".to_string());
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(!text.contains("Registering with EC…"));
+    }
+
+    #[test]
+    fn renders_error_message_in_actions_box() {
+        // Arrange
+        let mut app = app_with_election(ElectionStatus::Finished);
+        app.error_message = Some("EC did not respond in time".to_string());
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(text.contains("EC did not respond in time"));
+    }
+}

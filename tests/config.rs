@@ -51,3 +51,71 @@ fn save_and_reload_roundtrip() {
     let loaded = AppConfig::load(&path).unwrap();
     assert_eq!(config.nostr.relays, loaded.nostr.relays);
 }
+
+#[test]
+fn invalid_toml_returns_error() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("voter.toml");
+    fs::write(&path, "this is [[[ not valid toml").unwrap();
+
+    // Act
+    let result = AppConfig::load(&path);
+
+    // Assert
+    assert!(result.is_err());
+}
+
+#[test]
+fn defaults_use_dark_theme_and_no_pinned_ec_pubkey() {
+    let config = AppConfig::default();
+
+    assert_eq!(config.ui.theme, voter::config::Theme::Dark);
+    assert_eq!(config.nostr.ec_pubkey, None);
+    assert_eq!(
+        config.nostr.relays,
+        vec![
+            "wss://relay.mostro.network".to_string(),
+            "wss://nos.lol".to_string()
+        ]
+    );
+}
+
+#[test]
+fn save_creates_missing_parent_directories() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a").join("b").join("voter.toml");
+
+    // Act
+    AppConfig::default().save(&path).unwrap();
+
+    // Assert
+    assert!(path.exists());
+}
+
+#[test]
+fn theme_serde_roundtrip_for_dark_and_light() {
+    use voter::config::Theme;
+
+    for (theme, expected_json) in [(Theme::Dark, "\"dark\""), (Theme::Light, "\"light\"")] {
+        // Act
+        let json = serde_json::to_string(&theme).unwrap();
+        let parsed: Theme = serde_json::from_str(&json).unwrap();
+
+        // Assert
+        assert_eq!(json, expected_json);
+        assert_eq!(parsed, theme);
+    }
+}
+
+#[test]
+fn config_paths_are_non_empty() {
+    let dir = voter::config::config_dir();
+    let config_file = voter::config::config_path();
+    let state_file = AppConfig::default().state_path();
+
+    assert!(!dir.as_os_str().is_empty());
+    assert!(config_file.ends_with("voter.toml"));
+    assert!(state_file.ends_with("state.json"));
+}

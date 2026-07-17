@@ -98,3 +98,97 @@ pub fn render(app: &App, frame: &mut Frame, election_id: &str) {
     ]));
     frame.render_widget(hints, chunks[2]);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::render;
+    use crate::ui::test_support::{render_to_text, sample_election, test_app};
+    use voter::nostr::events::{ElectionResults, ElectionStatus, TallyEntry};
+
+    #[test]
+    fn shows_placeholder_when_results_are_missing() {
+        // Arrange
+        let (mut app, _dir) = test_app();
+        app.elections.insert(
+            "e1".to_string(),
+            sample_election(
+                "e1",
+                "Board Election",
+                ElectionStatus::Finished,
+                "plurality",
+            ),
+        );
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(text.contains("Results: Board Election"));
+        assert!(text.contains("Results not yet available."));
+        assert!(text.contains("Esc back"));
+    }
+
+    #[test]
+    fn renders_tally_sorted_descending_with_winner_badge_and_vote_formats() {
+        // Arrange
+        let (mut app, _dir) = test_app();
+        app.elections.insert(
+            "e1".to_string(),
+            sample_election("e1", "Board Election", ElectionStatus::Finished, "stv"),
+        );
+        app.results.insert(
+            "e1".to_string(),
+            ElectionResults {
+                election_id: "e1".to_string(),
+                elected: vec![2],
+                tally: vec![
+                    TallyEntry {
+                        candidate_id: 1,
+                        votes: 2.5,
+                    },
+                    TallyEntry {
+                        candidate_id: 2,
+                        votes: 3.0,
+                    },
+                ],
+            },
+        );
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "e1"));
+
+        // Assert: winner starred, whole votes without decimals, fractional with two
+        assert!(text.contains("Final Tally"));
+        assert!(text.contains("Bob ★"));
+        assert!(text.contains("3 votes"));
+        assert!(text.contains("2.50 votes"));
+        assert!(!text.contains("Alice ★"));
+        let bob_pos = text.find("Bob ★").unwrap();
+        let alice_pos = text.find("Alice").unwrap();
+        assert!(bob_pos < alice_pos, "highest tally must be listed first");
+    }
+
+    #[test]
+    fn falls_back_to_unknown_for_missing_election_and_candidate_names() {
+        // Arrange: results exist but the election announcement was never seen
+        let (mut app, _dir) = test_app();
+        app.results.insert(
+            "e1".to_string(),
+            ElectionResults {
+                election_id: "e1".to_string(),
+                elected: vec![],
+                tally: vec![TallyEntry {
+                    candidate_id: 99,
+                    votes: 1.0,
+                }],
+            },
+        );
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f, "e1"));
+
+        // Assert
+        assert!(text.contains("Results: Unknown"));
+        assert!(text.contains("Unknown  —  1 votes"));
+    }
+}

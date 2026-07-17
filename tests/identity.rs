@@ -128,6 +128,98 @@ fn save_identity_tightens_permissions_of_existing_file() {
     assert_eq!(mode & 0o777, 0o600, "identity file must be owner-only");
 }
 
+#[test]
+fn load_plaintext_identity_ignores_supplied_password() {
+    // Arrange: a plaintext identity, no encryption.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("identity.json");
+    let keys = identity::generate_keypair();
+    identity::save_identity(&keys, None, &path).unwrap();
+
+    // Act: supply a password anyway — it must be ignored for plaintext files.
+    let loaded = identity::load_identity(Some("irrelevant-password"), &path).unwrap();
+
+    // Assert
+    assert_eq!(loaded.public_key(), keys.public_key());
+}
+
+#[test]
+fn save_with_empty_password_writes_plaintext_file() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("identity.json");
+    let keys = identity::generate_keypair();
+
+    // Act: Some("") counts as "no password" — current behavior is plaintext.
+    identity::save_identity(&keys, Some(""), &path).unwrap();
+
+    // Assert
+    assert!(path.exists(), "plaintext file must be written");
+    assert!(
+        !path.with_extension("age").exists(),
+        "no encrypted file must be written for an empty password"
+    );
+    let loaded = identity::load_identity(None, &path).unwrap();
+    assert_eq!(loaded.public_key(), keys.public_key());
+}
+
+#[test]
+fn load_fails_for_corrupt_identity_json() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("identity.json");
+    std::fs::write(&path, "{ this is not json").unwrap();
+
+    // Act
+    let result = identity::load_identity(None, &path);
+
+    // Assert
+    assert!(result.is_err());
+}
+
+#[test]
+fn load_fails_for_valid_json_with_invalid_secret_key_hex() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("identity.json");
+    std::fs::write(&path, r#"{"secret_key": "zzzz-not-hex"}"#).unwrap();
+
+    // Act
+    let result = identity::load_identity(None, &path);
+
+    // Assert
+    assert!(result.is_err());
+}
+
+#[test]
+fn load_fails_for_encrypted_file_with_garbage_content() {
+    // Arrange: a .age file that is not a valid age ciphertext.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("identity.json");
+    std::fs::write(path.with_extension("age"), b"garbage, not age data").unwrap();
+
+    // Act
+    let result = identity::load_identity(Some("any-password"), &path);
+
+    // Assert
+    assert!(result.is_err());
+}
+
+#[test]
+fn load_encrypted_identity_without_password_fails() {
+    // Arrange: a properly encrypted identity.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("identity.json");
+    let keys = identity::generate_keypair();
+    identity::save_identity(&keys, Some("secret-pw"), &path).unwrap();
+
+    // Act
+    let result = identity::load_identity(None, &path);
+
+    // Assert
+    assert!(result.is_err());
+}
+
 /// Secret files (identity, state) must be written atomically: the destination
 /// is replaced via rename, never truncated in place. A crash mid-write must
 /// never leave a corrupt or empty file — for state.json that would destroy

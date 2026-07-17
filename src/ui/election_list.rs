@@ -101,3 +101,115 @@ pub fn render(app: &App, frame: &mut Frame) {
     ]));
     frame.render_widget(hints, chunks[2]);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::render;
+    use crate::ui::test_support::{
+        buffer_text, registration, render_to_terminal, render_to_text, sample_election, test_app,
+        voting_token,
+    };
+    use ratatui::style::Modifier;
+    use voter::nostr::events::ElectionStatus;
+
+    #[test]
+    fn renders_placeholder_and_hints_when_no_elections_exist() {
+        // Arrange
+        let (app, _dir) = test_app();
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f));
+
+        // Assert
+        assert!(text.contains("Elections"));
+        assert!(text.contains("No elections found. Waiting for announcements..."));
+        assert!(text.contains("j/k"));
+        assert!(text.contains("navigate"));
+        assert!(text.contains("quit"));
+    }
+
+    #[test]
+    fn renders_every_status_variant_with_name_and_candidate_count() {
+        // Arrange
+        let (mut app, _dir) = test_app();
+        for (id, name, status) in [
+            ("e1", "Alpha", ElectionStatus::Open),
+            ("e2", "Beta", ElectionStatus::InProgress),
+            ("e3", "Gamma", ElectionStatus::Finished),
+            ("e4", "Delta", ElectionStatus::Cancelled),
+        ] {
+            app.elections.insert(
+                id.to_string(),
+                sample_election(id, name, status, "plurality"),
+            );
+        }
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f));
+
+        // Assert
+        assert!(text.contains("Available Elections"));
+        assert!(text.contains("[Open] Alpha"));
+        assert!(text.contains("[In Progress] Beta"));
+        assert!(text.contains("[Finished] Gamma"));
+        assert!(text.contains("[Cancelled] Delta"));
+        assert!(text.contains("(3 candidates, plurality)"));
+    }
+
+    #[test]
+    fn highlights_selected_row_with_reversed_style() {
+        // Arrange
+        let (mut app, _dir) = test_app();
+        app.elections.insert(
+            "e1".to_string(),
+            sample_election("e1", "Alpha", ElectionStatus::Open, "plurality"),
+        );
+        app.elections.insert(
+            "e2".to_string(),
+            sample_election("e2", "Beta", ElectionStatus::Open, "plurality"),
+        );
+        app.election_list_index = 1;
+
+        // Act
+        let terminal = render_to_terminal(80, 24, |f| render(&app, f));
+
+        // Assert: some cell carries the REVERSED modifier for the selection
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Alpha"));
+        assert!(text.contains("Beta"));
+        let has_reversed = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.modifier.contains(Modifier::REVERSED));
+        assert!(has_reversed);
+    }
+
+    #[test]
+    fn shows_voted_and_registered_badges() {
+        // Arrange
+        let (mut app, _dir) = test_app();
+        app.elections.insert(
+            "e1".to_string(),
+            sample_election("e1", "Alpha", ElectionStatus::Finished, "plurality"),
+        );
+        app.elections.insert(
+            "e2".to_string(),
+            sample_election("e2", "Beta", ElectionStatus::Open, "plurality"),
+        );
+        app.persistent_state
+            .tokens
+            .insert("e1".to_string(), voting_token(true));
+        app.persistent_state
+            .registrations
+            .insert("e2".to_string(), registration());
+
+        // Act
+        let text = render_to_text(80, 24, |f| render(&app, f));
+
+        // Assert
+        assert!(text.contains("[voted]"));
+        assert!(text.contains("[registered]"));
+    }
+}
