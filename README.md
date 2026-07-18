@@ -41,6 +41,10 @@ Configuration is stored at `~/.config/voter/voter.toml` (created with defaults o
 
 ```toml
 [nostr]
+# Relay URLs must use wss:// (TLS). Plaintext ws:// is rejected at startup —
+# NIP-59 encrypts payloads end to end, but an unencrypted relay connection
+# leaks transport metadata. For local development against a test relay, set
+# allow_insecure_relays = true to permit ws://.
 relays = ["wss://relay.mostro.network", "wss://nos.lol"]
 
 # Trusted Electoral Commission Nostr public key (hex or npub).

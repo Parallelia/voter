@@ -23,6 +23,40 @@ pub struct NostrConfig {
     /// relay user can publish fake elections and harvest registration tokens.
     #[serde(default)]
     pub ec_pubkey: Option<String>,
+    /// Permit unencrypted `ws://` relays. Off by default: NIP-59 already
+    /// encrypts payloads end to end, but a plaintext relay leaks transport
+    /// metadata (which relay, when, message timing/sizes) to the network.
+    /// Only intended for local development against a test relay.
+    #[serde(default)]
+    pub allow_insecure_relays: bool,
+}
+
+impl NostrConfig {
+    /// Validate every relay URL scheme.
+    ///
+    /// `wss://` is always accepted; `ws://` only behind
+    /// [`allow_insecure_relays`](Self::allow_insecure_relays); anything else
+    /// is not a websocket relay URL and is rejected outright.
+    pub fn validate(&self) -> Result<()> {
+        for relay in &self.relays {
+            if relay.starts_with("wss://") {
+                continue;
+            }
+            if relay.starts_with("ws://") {
+                if self.allow_insecure_relays {
+                    continue;
+                }
+                return Err(VoterError::Config(format!(
+                    "relay \"{relay}\" is unencrypted; use wss:// (or set \
+                     allow_insecure_relays = true under [nostr] for local development)"
+                )));
+            }
+            return Err(VoterError::Config(format!(
+                "relay \"{relay}\" is not a websocket URL; relay URLs must start with wss://"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +89,7 @@ fn default_nostr() -> NostrConfig {
     NostrConfig {
         relays: default_relays(),
         ec_pubkey: None,
+        allow_insecure_relays: false,
     }
 }
 
@@ -108,6 +143,7 @@ impl AppConfig {
         if path.exists() {
             let contents = std::fs::read_to_string(path)?;
             let config: AppConfig = toml::from_str(&contents)?;
+            config.nostr.validate()?;
             Ok(config)
         } else {
             let config = AppConfig::default();
@@ -117,7 +153,11 @@ impl AppConfig {
     }
 
     /// Save config to the given path, creating parent directories.
+    ///
+    /// Runs the same relay validation as [`load`](Self::load) so an invalid
+    /// configuration can neither enter nor leave the process.
     pub fn save(&self, path: &Path) -> Result<()> {
+        self.nostr.validate()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
