@@ -9,7 +9,11 @@ use voter::nostr::messages::VoterMessage;
 
 fn offline_config(relays: Vec<String>, ec_pubkey: Option<String>) -> AppConfig {
     AppConfig {
-        nostr: NostrConfig { relays, ec_pubkey },
+        nostr: NostrConfig {
+            relays,
+            ec_pubkey,
+            ..Default::default()
+        },
         ..AppConfig::default()
     }
 }

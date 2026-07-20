@@ -3,7 +3,6 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum VoterError {
     #[error("Configuration error: {0}")]
-    #[allow(dead_code)]
     Config(String),
 
     #[error("Identity error: {0}")]
