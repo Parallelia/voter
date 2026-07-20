@@ -196,6 +196,74 @@ allow_insecure_relays = true
 }
 
 #[test]
+fn relay_scheme_check_ignores_case_and_surrounding_whitespace() {
+    // Arrange: URL schemes are case-insensitive (RFC 3986 §3.1), and a
+    // hand-edited TOML easily picks up stray spaces. nostr-sdk accepts and
+    // normalizes all of these, so the validator must not reject them.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("voter.toml");
+    fs::write(
+        &path,
+        r#"
+[nostr]
+relays = ["WSS://upper.relay", " wss://padded.relay ", "Wss://Mixed.Relay"]
+"#,
+    )
+    .unwrap();
+
+    // Act
+    let config = AppConfig::load(&path).unwrap();
+
+    // Assert: accepted, and stored verbatim for nostr-sdk to normalize.
+    assert_eq!(config.nostr.relays.len(), 3);
+}
+
+#[test]
+fn uppercase_ws_relay_is_reported_as_unencrypted() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("voter.toml");
+    fs::write(
+        &path,
+        r#"
+[nostr]
+relays = ["WS://plaintext.relay"]
+"#,
+    )
+    .unwrap();
+
+    // Act
+    let err = AppConfig::load(&path).unwrap_err();
+
+    // Assert: caught by the insecure-relay check itself, not the catch-all,
+    // so the operator gets the actionable message rather than "not a websocket".
+    let msg = err.to_string();
+    assert!(msg.contains("WS://plaintext.relay"), "got: {msg}");
+    assert!(msg.contains("unencrypted"), "got: {msg}");
+}
+
+#[test]
+fn padded_ws_relay_is_reported_as_unencrypted() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("voter.toml");
+    fs::write(
+        &path,
+        r#"
+[nostr]
+relays = ["  ws://plaintext.relay  "]
+"#,
+    )
+    .unwrap();
+
+    // Act
+    let err = AppConfig::load(&path).unwrap_err();
+
+    // Assert
+    assert!(err.to_string().contains("unencrypted"), "got: {err}");
+}
+
+#[test]
 fn insecure_opt_in_defaults_to_off_and_roundtrips() {
     let config = AppConfig::default();
     assert!(!config.nostr.allow_insecure_relays);

@@ -12,7 +12,7 @@ fn offline_config(relays: Vec<String>, ec_pubkey: Option<String>) -> AppConfig {
         nostr: NostrConfig {
             relays,
             ec_pubkey,
-            allow_insecure_relays: false,
+            ..Default::default()
         },
         ..AppConfig::default()
     }

@@ -37,12 +37,21 @@ impl NostrConfig {
     /// `wss://` is always accepted; `ws://` only behind
     /// [`allow_insecure_relays`](Self::allow_insecure_relays); anything else
     /// is not a websocket relay URL and is rejected outright.
+    ///
+    /// The scheme is matched case-insensitively and ignoring surrounding
+    /// whitespace, because URL schemes are case-insensitive (RFC 3986 §3.1)
+    /// and nostr-sdk accepts and normalizes both forms. Matching strictly
+    /// would reject a working `WSS://` relay and — worse — would let `WS://`
+    /// fall through to the catch-all instead of the insecure-relay check that
+    /// exists to detect exactly that. Errors quote the entry verbatim so it
+    /// can be located in the config file.
     pub fn validate(&self) -> Result<()> {
         for relay in &self.relays {
-            if relay.starts_with("wss://") {
+            let normalized = relay.trim().to_ascii_lowercase();
+            if normalized.starts_with("wss://") {
                 continue;
             }
-            if relay.starts_with("ws://") {
+            if normalized.starts_with("ws://") {
                 if self.allow_insecure_relays {
                     continue;
                 }
