@@ -20,6 +20,12 @@ pub struct Election {
     /// Nostr pubkey of the EC that published this election (not from JSON).
     #[serde(skip)]
     pub ec_pubkey: Option<String>,
+    /// `created_at` of the event that carried this election, in unix seconds
+    /// (not from JSON). Announcements are replaceable and the EC republishes
+    /// them on every change, so this orders versions and lets a stale replay
+    /// from a lagging relay be discarded.
+    #[serde(skip)]
+    pub event_created_at: Option<u64>,
 }
 
 /// Election status as published by the EC (`"open"`, `"in_progress"`,

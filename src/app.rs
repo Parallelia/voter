@@ -213,8 +213,19 @@ impl App {
     fn handle_nostr(&mut self, action: NostrAction) {
         match action {
             NostrAction::ElectionUpdate(election) => {
-                self.elections
-                    .insert(election.election_id.clone(), election);
+                // Announcements are replaceable events: with several relays a
+                // lagging one can deliver an old version after a newer one.
+                // Keep the newest; equal timestamps are treated as an update.
+                let is_stale = self
+                    .elections
+                    .get(&election.election_id)
+                    .and_then(|current| current.event_created_at)
+                    .zip(election.event_created_at)
+                    .is_some_and(|(current, incoming)| incoming < current);
+                if !is_stale {
+                    self.elections
+                        .insert(election.election_id.clone(), election);
+                }
             }
             NostrAction::ElectionResult(results) => {
                 self.results.insert(results.election_id.clone(), results);
@@ -887,6 +898,7 @@ mod tests {
                 },
             ],
             ec_pubkey: Some("ec-pubkey-hex".to_string()),
+            event_created_at: None,
         }
     }
 
@@ -2231,6 +2243,56 @@ mod tests {
         let election = app.elections.get("e1").expect("election stored");
         assert_eq!(election.name, "Renamed");
         assert_eq!(election.status, ElectionStatus::InProgress);
+    }
+
+    #[test]
+    fn election_update_older_than_the_stored_one_is_ignored() {
+        // Arrange: the EC republishes the announcement on every change, and a
+        // lagging relay can deliver an older version after a newer one.
+        let (mut app, _rx, _dir) = isolated_app();
+        let fresh = Election {
+            event_created_at: Some(200),
+            ..plurality_election("e1", "Fresh", ElectionStatus::InProgress)
+        };
+        let stale = Election {
+            event_created_at: Some(100),
+            candidates: vec![Candidate {
+                id: 1,
+                name: "Alice".to_string(),
+            }],
+            ..plurality_election("e1", "Stale", ElectionStatus::Open)
+        };
+
+        // Act
+        app.update(Action::Nostr(NostrAction::ElectionUpdate(fresh)));
+        app.update(Action::Nostr(NostrAction::ElectionUpdate(stale)));
+
+        // Assert
+        let election = app.elections.get("e1").expect("election stored");
+        assert_eq!(election.name, "Fresh");
+        assert_eq!(election.candidates.len(), 2);
+    }
+
+    #[test]
+    fn election_update_newer_than_the_stored_one_replaces_it() {
+        // Arrange
+        let (mut app, _rx, _dir) = isolated_app();
+        let old = Election {
+            event_created_at: Some(100),
+            ..plurality_election("e1", "Old", ElectionStatus::Open)
+        };
+        let new = Election {
+            event_created_at: Some(101),
+            ..plurality_election("e1", "New", ElectionStatus::InProgress)
+        };
+
+        // Act
+        app.update(Action::Nostr(NostrAction::ElectionUpdate(old)));
+        app.update(Action::Nostr(NostrAction::ElectionUpdate(new)));
+
+        // Assert
+        let election = app.elections.get("e1").expect("election stored");
+        assert_eq!(election.name, "New");
     }
 
     #[test]

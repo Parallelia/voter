@@ -374,6 +374,11 @@ impl NostrVoterClient {
                                     Ok(mut election) => {
                                         // Capture EC pubkey from the event author
                                         election.ec_pubkey = Some(event.pubkey.to_hex());
+                                        // Version stamp: announcements are
+                                        // replaceable, so an older replay must
+                                        // not overwrite what we already have.
+                                        election.event_created_at =
+                                            Some(event.created_at.as_secs());
                                         let _ = tx.send(NostrAction::ElectionUpdate(election));
                                     }
                                     Err(e) => {
