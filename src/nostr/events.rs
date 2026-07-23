@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 
 /// An election parsed from a Kind 35000 Nostr event.
 ///
@@ -20,6 +21,43 @@ pub struct Election {
     /// Nostr pubkey of the EC that published this election (not from JSON).
     #[serde(skip)]
     pub ec_pubkey: Option<String>,
+    /// `created_at` of the event that carried this election, in unix seconds
+    /// (not from JSON). Announcements are replaceable and the EC republishes
+    /// them on every change, so this orders versions and lets a stale replay
+    /// from a lagging relay be discarded.
+    #[serde(skip)]
+    pub event_created_at: Option<u64>,
+    /// Hex id of the event that carried this election (not from JSON). Breaks
+    /// ties between two announcements published within the same second.
+    #[serde(skip)]
+    pub event_id: Option<String>,
+}
+
+impl Election {
+    /// Whether this announcement should replace `current`, following the
+    /// NIP-01 ordering for replaceable events: the greater `created_at` wins
+    /// and, on a tie, the lowest event id is retained.
+    ///
+    /// Announcements without event metadata (values built locally rather than
+    /// received from a relay) always replace, so no update is silently lost.
+    pub fn supersedes(&self, current: &Self) -> bool {
+        let (Some(incoming_at), Some(current_at)) =
+            (self.event_created_at, current.event_created_at)
+        else {
+            return true;
+        };
+
+        match incoming_at.cmp(&current_at) {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            // Same second: NIP-01 keeps the lowest id. An identical id is the
+            // same event arriving twice, so replacing is a no-op.
+            Ordering::Equal => match (&self.event_id, &current.event_id) {
+                (Some(incoming_id), Some(current_id)) => incoming_id <= current_id,
+                _ => true,
+            },
+        }
+    }
 }
 
 /// Election status as published by the EC (`"open"`, `"in_progress"`,
