@@ -215,14 +215,12 @@ impl App {
             NostrAction::ElectionUpdate(election) => {
                 // Announcements are replaceable events: with several relays a
                 // lagging one can deliver an old version after a newer one.
-                // Keep the newest; equal timestamps are treated as an update.
-                let is_stale = self
+                // NIP-01 ordering decides which version is retained.
+                let supersedes = self
                     .elections
                     .get(&election.election_id)
-                    .and_then(|current| current.event_created_at)
-                    .zip(election.event_created_at)
-                    .is_some_and(|(current, incoming)| incoming < current);
-                if !is_stale {
+                    .is_none_or(|current| election.supersedes(current));
+                if supersedes {
                     self.elections
                         .insert(election.election_id.clone(), election);
                 }
@@ -899,6 +897,7 @@ mod tests {
             ],
             ec_pubkey: Some("ec-pubkey-hex".to_string()),
             event_created_at: None,
+            event_id: None,
         }
     }
 
@@ -2293,6 +2292,87 @@ mod tests {
         // Assert
         let election = app.elections.get("e1").expect("election stored");
         assert_eq!(election.name, "New");
+    }
+
+    #[test]
+    fn election_update_with_same_timestamp_and_lower_event_id_replaces_it() {
+        // Arrange: two announcements published within the same second. NIP-01
+        // keeps the one with the lowest event id.
+        let (mut app, _rx, _dir) = isolated_app();
+        let stored = Election {
+            event_created_at: Some(100),
+            event_id: Some("bb".to_string()),
+            ..plurality_election("e1", "Stored", ElectionStatus::Open)
+        };
+        let winner = Election {
+            event_created_at: Some(100),
+            event_id: Some("aa".to_string()),
+            ..plurality_election("e1", "Winner", ElectionStatus::InProgress)
+        };
+
+        // Act
+        app.update(Action::Nostr(NostrAction::ElectionUpdate(stored)));
+        app.update(Action::Nostr(NostrAction::ElectionUpdate(winner)));
+
+        // Assert
+        let election = app.elections.get("e1").expect("election stored");
+        assert_eq!(election.name, "Winner");
+        assert_eq!(election.status, ElectionStatus::InProgress);
+    }
+
+    #[test]
+    fn election_update_with_same_timestamp_and_higher_event_id_is_ignored() {
+        // Arrange: a same-second replay from a lagging relay must not roll the
+        // retained version back.
+        let (mut app, _rx, _dir) = isolated_app();
+        let stored = Election {
+            event_created_at: Some(100),
+            event_id: Some("aa".to_string()),
+            ..plurality_election("e1", "Stored", ElectionStatus::InProgress)
+        };
+        let loser = Election {
+            event_created_at: Some(100),
+            event_id: Some("bb".to_string()),
+            candidates: vec![Candidate {
+                id: 1,
+                name: "Alice".to_string(),
+            }],
+            ..plurality_election("e1", "Loser", ElectionStatus::Open)
+        };
+
+        // Act
+        app.update(Action::Nostr(NostrAction::ElectionUpdate(stored)));
+        app.update(Action::Nostr(NostrAction::ElectionUpdate(loser)));
+
+        // Assert
+        let election = app.elections.get("e1").expect("election stored");
+        assert_eq!(election.name, "Stored");
+        assert_eq!(election.status, ElectionStatus::InProgress);
+        assert_eq!(election.candidates.len(), 2);
+    }
+
+    #[test]
+    fn election_update_with_same_timestamp_and_no_event_id_replaces_it() {
+        // Arrange: without ids there is no tie-breaker, so the update applies
+        // rather than being silently dropped.
+        let (mut app, _rx, _dir) = isolated_app();
+        let old = Election {
+            event_created_at: Some(100),
+            ..plurality_election("e1", "Old", ElectionStatus::Open)
+        };
+        let equal = Election {
+            event_created_at: Some(100),
+            ..plurality_election("e1", "Equal", ElectionStatus::InProgress)
+        };
+
+        // Act
+        app.update(Action::Nostr(NostrAction::ElectionUpdate(old)));
+        app.update(Action::Nostr(NostrAction::ElectionUpdate(equal)));
+
+        // Assert
+        let election = app.elections.get("e1").expect("election stored");
+        assert_eq!(election.name, "Equal");
+        assert_eq!(election.status, ElectionStatus::InProgress);
     }
 
     #[test]

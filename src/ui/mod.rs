@@ -123,6 +123,7 @@ pub mod test_support {
             ],
             ec_pubkey: None,
             event_created_at: None,
+            event_id: None,
         }
     }
 

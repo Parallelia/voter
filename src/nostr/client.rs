@@ -379,6 +379,7 @@ impl NostrVoterClient {
                                         // not overwrite what we already have.
                                         election.event_created_at =
                                             Some(event.created_at.as_secs());
+                                        election.event_id = Some(event.id.to_hex());
                                         let _ = tx.send(NostrAction::ElectionUpdate(election));
                                     }
                                     Err(e) => {
